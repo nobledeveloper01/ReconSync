@@ -1,0 +1,13 @@
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+.env
+.env.*
+!.env.example
+.DS_Store
+node_modules/
+
+# Local working notes — not published
+docs/

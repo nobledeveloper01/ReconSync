@@ -1,0 +1,171 @@
+package store
+
+import (
+	"context"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/nobledeveloper01/ReconSync/internal/domain"
+)
+
+// Memory is an in-memory Store for unit tests and local runs. It is held to the
+// same conformance suite as Postgres so the two cannot drift.
+type Memory struct {
+	mu      sync.RWMutex
+	tenants map[string]struct{}
+
+	// byTenant[tenantID][transactionID]
+	byTenant map[string]map[string]*domain.Transaction
+	// idem[tenantID][idempotencyKey]
+	idem map[string]map[string]struct{}
+
+	nextID int64
+}
+
+// NewMemory returns an empty in-memory store.
+func NewMemory() *Memory {
+	return &Memory{
+		tenants:  make(map[string]struct{}),
+		byTenant: make(map[string]map[string]*domain.Transaction),
+		idem:     make(map[string]map[string]struct{}),
+	}
+}
+
+var _ Store = (*Memory)(nil)
+
+func (m *Memory) EnsureTenant(_ context.Context, id, _, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tenants[id] = struct{}{}
+	return nil
+}
+
+func (m *Memory) UpsertDebits(_ context.Context, tenantID string, txns []*domain.Transaction) (UpsertResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var res UpsertResult
+	for _, t := range txns {
+		if t.TenantID != tenantID {
+			return UpsertResult{}, ErrTenantMismatch
+		}
+	}
+
+	if m.byTenant[tenantID] == nil {
+		m.byTenant[tenantID] = make(map[string]*domain.Transaction)
+		m.idem[tenantID] = make(map[string]struct{})
+	}
+
+	for _, t := range txns {
+		_, dupKey := m.idem[tenantID][t.IdempotencyKey]
+		_, dupTxn := m.byTenant[tenantID][t.TransactionID]
+		if dupKey || dupTxn {
+			res.Duplicates = append(res.Duplicates, t.TransactionID)
+			continue
+		}
+
+		m.nextID++
+		stored := *t // copy: callers must not be able to mutate stored state
+		stored.ID = m.nextID
+		stored.Status = domain.StatusPendingDebit
+		now := time.Now().UTC()
+		stored.CreatedAt, stored.UpdatedAt = now, now
+
+		m.byTenant[tenantID][t.TransactionID] = &stored
+		m.idem[tenantID][t.IdempotencyKey] = struct{}{}
+		res.Inserted = append(res.Inserted, t.TransactionID)
+	}
+	return res, nil
+}
+
+func (m *Memory) ApplyCredit(_ context.Context, tenantID, transactionID string, target domain.Status, creditAt time.Time) (*domain.Transaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	stored, ok := m.byTenant[tenantID][transactionID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if err := domain.Transition(stored.Status, target); err != nil {
+		return nil, err
+	}
+
+	stored.Status = target
+	at := creditAt.UTC()
+	stored.CreditAt = &at
+	stored.UpdatedAt = time.Now().UTC()
+	if target == domain.StatusOrphaned {
+		detected := stored.UpdatedAt
+		stored.DetectedAt = &detected
+	}
+
+	out := *stored
+	return &out, nil
+}
+
+func (m *Memory) Get(_ context.Context, tenantID, transactionID string) (*domain.Transaction, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	stored, ok := m.byTenant[tenantID][transactionID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	out := *stored
+	return &out, nil
+}
+
+func (m *Memory) ListByStatus(_ context.Context, tenantID string, status domain.Status, limit int) ([]*domain.Transaction, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var out []*domain.Transaction
+	for _, t := range m.byTenant[tenantID] {
+		if t.Status == status {
+			cp := *t
+			out = append(out, &cp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DebitAt.After(out[j].DebitAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *Memory) ClaimExpired(_ context.Context, now time.Time, limit int) ([]*domain.Transaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var due []*domain.Transaction
+	for _, txns := range m.byTenant {
+		for _, t := range txns {
+			if t.IsExpiredAt(now) {
+				due = append(due, t)
+			}
+		}
+	}
+	// Oldest deadline first, matching the scheduler's ORDER BY.
+	sort.Slice(due, func(i, j int) bool {
+		return due[i].ExpectedCompletionAt.Before(due[j].ExpectedCompletionAt)
+	})
+	if limit > 0 && len(due) > limit {
+		due = due[:limit]
+	}
+
+	out := make([]*domain.Transaction, 0, len(due))
+	for _, t := range due {
+		target := domain.StatusOrphaned
+		if t.Status == domain.StatusPendingUnknown {
+			target = domain.StatusSuspect
+		}
+		t.Status = target
+		detected := now.UTC()
+		t.DetectedAt = &detected
+		t.UpdatedAt = detected
+		cp := *t
+		out = append(out, &cp)
+	}
+	return out, nil
+}

@@ -1,0 +1,10 @@
+DROP TRIGGER IF EXISTS audit_records_no_truncate ON audit_records;
+DROP TRIGGER IF EXISTS audit_records_no_update_delete ON audit_records;
+DROP FUNCTION IF EXISTS audit_records_immutable();
+DROP TABLE IF EXISTS audit_records;
+DROP TABLE IF EXISTS webhook_deliveries;
+DROP TABLE IF EXISTS webhook_endpoints;
+DROP TABLE IF EXISTS reconciliation_rules;
+DROP TABLE IF EXISTS transactions;
+DROP TABLE IF EXISTS api_keys;
+DROP TABLE IF EXISTS tenants;
