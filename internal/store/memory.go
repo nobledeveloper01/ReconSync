@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 )
 
@@ -23,6 +25,9 @@ type Memory struct {
 	// parked[tenantID][transactionID] — credits awaiting their debit
 	parked map[string]map[string]*domain.CreditEvent
 
+	// apiKeys by prefix
+	apiKeys map[string]*auth.Record
+
 	nextID int64
 }
 
@@ -33,6 +38,7 @@ func NewMemory() *Memory {
 		byTenant: make(map[string]map[string]*domain.Transaction),
 		idem:     make(map[string]map[string]struct{}),
 		parked:   make(map[string]map[string]*domain.CreditEvent),
+		apiKeys:  make(map[string]*auth.Record),
 	}
 }
 
@@ -106,6 +112,89 @@ func (m *Memory) ApplyCredit(_ context.Context, tenantID, transactionID string, 
 
 	out := *stored
 	return &out, nil
+}
+
+func (m *Memory) MarkReversalPending(_ context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
+	return m.markReversal(tenantID, transactionID, domain.StatusReversalPending, at)
+}
+
+func (m *Memory) MarkReversalCompleted(_ context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
+	return m.markReversal(tenantID, transactionID, domain.StatusReversalCompleted, at)
+}
+
+func (m *Memory) markReversal(tenantID, transactionID string, target domain.Status, at time.Time) (*domain.Transaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	stored, ok := m.byTenant[tenantID][transactionID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if err := domain.Transition(stored.Status, target); err != nil {
+		return nil, err
+	}
+
+	stored.Status = target
+	stamp := at.UTC()
+	switch target {
+	case domain.StatusReversalPending:
+		stored.ReversalTriggeredAt = &stamp
+	case domain.StatusReversalCompleted:
+		stored.ReversalCompletedAt = &stamp
+	}
+	stored.UpdatedAt = time.Now().UTC()
+
+	out := *stored
+	return &out, nil
+}
+
+func (m *Memory) CreateAPIKey(_ context.Context, tenantID, keyID string, key auth.Key, scopes []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.apiKeys[key.Prefix]; exists {
+		return fmt.Errorf("store: api key prefix %q already exists", key.Prefix)
+	}
+	env, _ := auth.EnvironmentOf(key.Secret)
+	m.apiKeys[key.Prefix] = &auth.Record{
+		ID:          keyID,
+		TenantID:    tenantID,
+		Prefix:      key.Prefix,
+		Hash:        key.Hash,
+		Scopes:      scopes,
+		Environment: env,
+	}
+	return nil
+}
+
+func (m *Memory) APIKeyByPrefix(_ context.Context, prefix string) (*auth.Record, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	rec, ok := m.apiKeys[prefix]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := *rec
+	return &cp, nil
+}
+
+func (m *Memory) TouchAPIKey(_ context.Context, _ string) error { return nil }
+
+func (m *Memory) RevokeAPIKey(_ context.Context, tenantID, keyID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, rec := range m.apiKeys {
+		// Already-revoked keys are skipped, so a second revoke reports not-found
+		// rather than looking like a fresh one.
+		if rec.ID == keyID && rec.TenantID == tenantID && rec.RevokedAt == nil {
+			now := time.Now().UTC()
+			rec.RevokedAt = &now
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 func (m *Memory) ParkCredit(_ context.Context, tenantID string, ev *domain.CreditEvent) error {

@@ -4,6 +4,9 @@ TEST_DB      ?= reconsync_test
 TEST_DB_URL  ?= postgres://localhost:5432/$(TEST_DB)?sslmode=disable
 MIGRATIONS   := migrations
 
+# Keep in step with .github/workflows/ci.yml so local and CI agree.
+GOLANGCI_LINT_VERSION ?= v2.12.2
+
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "};{printf "  \033[36m%-18s\033[0m %s\n",$$1,$$2}'
 
@@ -31,8 +34,15 @@ fmt: ## Format
 tidy: ## Tidy modules
 	go mod tidy
 
-lint: ## golangci-lint if installed, else vet
-	@if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run; else echo "golangci-lint not installed; running go vet"; go vet ./...; fi
+lint: ## Lint with the same golangci-lint version CI pins
+	@command -v golangci-lint >/dev/null 2>&1 || \
+		{ echo "installing golangci-lint $(GOLANGCI_LINT_VERSION)"; \
+		  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); }
+	golangci-lint run ./...
+
+vuln: ## Scan for known vulnerabilities (§8.5)
+	@command -v govulncheck >/dev/null 2>&1 || go install golang.org/x/vuln/cmd/govulncheck@latest
+	govulncheck ./...
 
 db-setup: ## Create the local test database
 	@createdb $(TEST_DB) 2>/dev/null || true

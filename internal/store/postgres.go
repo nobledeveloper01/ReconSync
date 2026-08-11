@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 )
 
@@ -25,9 +26,9 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres {
 	return &Postgres{pool: pool}
 }
 
-// applyCreditAttempts bounds the retry when the update and the follow-up
+// transitionAttempts bounds the retry when the update and the follow-up
 // classification read see different snapshots.
-const applyCreditAttempts = 3
+const transitionAttempts = 3
 
 // txnColumns is the read projection, in the order scanTransaction expects.
 const txnColumns = `id, tenant_id, transaction_id, idempotency_key, transaction_type,
@@ -161,55 +162,152 @@ func (p *Postgres) UpsertDebits(ctx context.Context, tenantID string, txns []*do
 }
 
 func (p *Postgres) ApplyCredit(ctx context.Context, tenantID, transactionID string, target domain.Status, creditAt time.Time) (*domain.Transaction, error) {
-	sources := domain.SourcesFor(target)
-	if len(sources) == 0 {
+	allowed := allowedSources(target)
+	if len(allowed) == 0 {
 		return nil, domain.InvalidTransitionError{From: "", To: target}
-	}
-	allowed := make([]string, len(sources))
-	for i, s := range sources {
-		allowed[i] = string(s)
 	}
 
 	// The status guard rides in the same statement as the write, so a credit
 	// racing the detection sweep either wins cleanly or is rejected — it can
 	// never overwrite a state the machine forbids.
-	for attempt := 0; attempt < applyCreditAttempts; attempt++ {
-		row := p.pool.QueryRow(ctx, `
-			UPDATE transactions
-			SET status = $3,
-			    credit_at = $4,
-			    detected_at = CASE WHEN $3 = 'orphaned' THEN now() ELSE detected_at END,
-			    updated_at = now()
-			WHERE tenant_id = $1 AND transaction_id = $2 AND status = ANY($5)
-			RETURNING `+txnColumns,
-			tenantID, transactionID, string(target), creditAt, allowed)
+	return p.applyTransition(ctx, tenantID, transactionID, target, `
+		UPDATE transactions
+		SET status = $3,
+		    credit_at = $4,
+		    detected_at = CASE WHEN $3 = 'orphaned' THEN now() ELSE detected_at END,
+		    updated_at = now()
+		WHERE tenant_id = $1 AND transaction_id = $2 AND status = ANY($5)
+		RETURNING `+txnColumns,
+		tenantID, transactionID, string(target), creditAt, allowed)
+}
+
+// MarkReversalPending records that the reversal webhook has been dispatched.
+// Legal from orphaned, and from reversal_failed on a dead-letter replay.
+func (p *Postgres) MarkReversalPending(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
+	target := domain.StatusReversalPending
+	return p.applyTransition(ctx, tenantID, transactionID, target, `
+		UPDATE transactions
+		SET status = $3,
+		    reversal_triggered_at = $4,
+		    updated_at = now()
+		WHERE tenant_id = $1 AND transaction_id = $2 AND status = ANY($5)
+		RETURNING `+txnColumns,
+		tenantID, transactionID, string(target), at, allowedSources(target))
+}
+
+// MarkReversalCompleted records that the customer's system finished reversing
+// (§3.2 C2). Only legal from reversal_pending.
+func (p *Postgres) MarkReversalCompleted(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
+	target := domain.StatusReversalCompleted
+	return p.applyTransition(ctx, tenantID, transactionID, target, `
+		UPDATE transactions
+		SET status = $3,
+		    reversal_completed_at = $4,
+		    updated_at = now()
+		WHERE tenant_id = $1 AND transaction_id = $2 AND status = ANY($5)
+		RETURNING `+txnColumns,
+		tenantID, transactionID, string(target), at, allowedSources(target))
+}
+
+// allowedSources renders the legal predecessors of a state for a SQL guard.
+func allowedSources(target domain.Status) []string {
+	sources := domain.SourcesFor(target)
+	out := make([]string, len(sources))
+	for i, s := range sources {
+		out[i] = string(s)
+	}
+	return out
+}
+
+// applyTransition runs a guarded state change and classifies a no-match result.
+func (p *Postgres) applyTransition(ctx context.Context, tenantID, transactionID string, target domain.Status, query string, args ...any) (*domain.Transaction, error) {
+	for attempt := 0; attempt < transitionAttempts; attempt++ {
+		row := p.pool.QueryRow(ctx, query, args...)
 
 		t, err := scanTransaction(row)
 		if err == nil {
 			return t, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("apply credit: %w", err)
+			return nil, fmt.Errorf("transition %s: %w", transactionID, err)
 		}
 
 		// No row matched: either it does not exist, or the guard rejected it.
 		current, getErr := p.Get(ctx, tenantID, transactionID)
 		if getErr != nil {
-			return nil, getErr // ErrNotFound: the debit has not arrived
+			return nil, getErr // ErrNotFound
 		}
 
 		// The row is now in a state the target is reachable from, so the UPDATE
-		// and this read saw different snapshots — the debit landed, or the sweep
+		// and this read saw different snapshots — the row landed, or the sweep
 		// moved it, in between. Reporting an invalid transition here would
-		// discard a credit that is perfectly legal to apply, so retry instead.
+		// discard a write that is perfectly legal, so retry instead.
 		if domain.CanTransition(current.Status, target) {
 			continue
 		}
 		return nil, domain.InvalidTransitionError{From: current.Status, To: target}
 	}
 
-	return nil, fmt.Errorf("apply credit %s: gave up after %d contended attempts",
-		transactionID, applyCreditAttempts)
+	return nil, fmt.Errorf("transition %s -> %s: gave up after %d contended attempts",
+		transactionID, target, transitionAttempts)
+}
+
+func (p *Postgres) CreateAPIKey(ctx context.Context, tenantID, keyID string, key auth.Key, scopes []string) error {
+	if scopes == nil {
+		scopes = []string{}
+	}
+	_, err := p.pool.Exec(ctx,
+		`INSERT INTO api_keys (id, tenant_id, prefix, hash, scopes) VALUES ($1, $2, $3, $4, $5)`,
+		keyID, tenantID, key.Prefix, key.Hash, scopes)
+	if err != nil {
+		return fmt.Errorf("create api key: %w", err)
+	}
+	return nil
+}
+
+// APIKeyByPrefix resolves a key prefix. Not tenant-scoped: it is what determines
+// the tenant. Revoked keys are returned so the caller can reject them uniformly
+// rather than learning anything from a different error.
+func (p *Postgres) APIKeyByPrefix(ctx context.Context, prefix string) (*auth.Record, error) {
+	var (
+		rec    auth.Record
+		scopes []string
+	)
+	err := p.pool.QueryRow(ctx,
+		`SELECT id, tenant_id, prefix, hash, scopes, revoked_at FROM api_keys WHERE prefix = $1`,
+		prefix).Scan(&rec.ID, &rec.TenantID, &rec.Prefix, &rec.Hash, &scopes, &rec.RevokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup api key: %w", err)
+	}
+
+	rec.Scopes = scopes
+	rec.Environment, _ = auth.EnvironmentOf(rec.Prefix)
+	return &rec, nil
+}
+
+func (p *Postgres) TouchAPIKey(ctx context.Context, keyID string) error {
+	_, err := p.pool.Exec(ctx, `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, keyID)
+	if err != nil {
+		return fmt.Errorf("touch api key: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) RevokeAPIKey(ctx context.Context, tenantID, keyID string) error {
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE api_keys SET revoked_at = now()
+		 WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL`,
+		tenantID, keyID)
+	if err != nil {
+		return fmt.Errorf("revoke api key: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (p *Postgres) ParkCredit(ctx context.Context, tenantID string, ev *domain.CreditEvent) error {

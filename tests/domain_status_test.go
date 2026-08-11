@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
@@ -170,8 +171,8 @@ func TestTransitionReturnsTypedError(t *testing.T) {
 	if err == nil {
 		t.Fatal("illegal transition returned nil error")
 	}
-	ite, ok := err.(domain.InvalidTransitionError)
-	if !ok {
+	var ite domain.InvalidTransitionError
+	if !errors.As(err, &ite) {
 		t.Fatalf("error is %T, want InvalidTransitionError so ingest can map it to 409", err)
 	}
 	if ite.From != domain.StatusCompleted || ite.To != domain.StatusOrphaned {

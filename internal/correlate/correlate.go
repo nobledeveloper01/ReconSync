@@ -229,9 +229,12 @@ func (e *Engine) drainParked(ctx context.Context, tenantID string, transactionID
 
 // tryApply attempts a single credit against stored state without parking.
 func (e *Engine) tryApply(ctx context.Context, tenantID string, c *domain.CreditEvent) (creditOutcome, error) {
+	// Validate rejects unknown verdicts on the way in and the database
+	// CHECK-constrains parked ones, so reaching here means stored state is
+	// corrupt. Surface it rather than silently dropping the credit.
 	target, err := c.Status.TargetStatus()
 	if err != nil {
-		return creditIgnored, nil // Validate already rejected unknown verdicts
+		return creditIgnored, fmt.Errorf("credit %s: %w", c.TransactionID, err)
 	}
 
 	_, err = e.store.ApplyCredit(ctx, tenantID, c.TransactionID, target, c.CreditAt)

@@ -51,7 +51,7 @@ func TestPipelineThroughCorrelationToPostgres(t *testing.T) {
 			}
 			if len(res.Rejections) > 0 {
 				mu.Lock()
-				batchErr = fmt.Errorf("unexpected rejection: %v", res.Rejections[0].Err)
+				batchErr = fmt.Errorf("unexpected rejection: %w", res.Rejections[0].Err)
 				mu.Unlock()
 			}
 			return nil

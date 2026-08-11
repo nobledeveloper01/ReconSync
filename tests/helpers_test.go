@@ -27,9 +27,15 @@ const (
 	maxScanDepth     = 8
 )
 
+// Torn down in reverse order, then rebuilt, so each run starts from a known
+// schema regardless of what the previous one left behind.
 var migrationFiles = []string{
-	"0002_pending_credits.down.sql", "0001_init.down.sql",
-	"0001_init.up.sql", "0002_pending_credits.up.sql",
+	"0003_api_key_scopes.down.sql",
+	"0002_pending_credits.down.sql",
+	"0001_init.down.sql",
+	"0001_init.up.sql",
+	"0002_pending_credits.up.sql",
+	"0003_api_key_scopes.up.sql",
 }
 
 // testPool connects to the database named by RECONSYNC_TEST_DATABASE_URL and

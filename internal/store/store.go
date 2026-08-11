@@ -10,6 +10,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 )
 
@@ -40,6 +41,12 @@ type TransactionStore interface {
 	// update so a credit racing detection cannot overwrite it.
 	// Returns ErrNotFound, or domain.InvalidTransitionError if the edge is illegal.
 	ApplyCredit(ctx context.Context, tenantID, transactionID string, target domain.Status, creditAt time.Time) (*domain.Transaction, error)
+
+	// MarkReversalPending records that the reversal webhook has been dispatched.
+	MarkReversalPending(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error)
+
+	// MarkReversalCompleted records the customer confirming a reversal (§3.2 C2).
+	MarkReversalCompleted(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error)
 
 	// Get returns one transaction scoped to the tenant.
 	Get(ctx context.Context, tenantID, transactionID string) (*domain.Transaction, error)
@@ -79,8 +86,20 @@ type TenantStore interface {
 	EnsureTenant(ctx context.Context, id, name, environment string) error
 }
 
+// APIKeyStore persists API keys and satisfies auth.Lookup.
+//
+// APIKeyByPrefix is the second documented exception to the tenantID-first rule:
+// it is what resolves the tenant, so it cannot already be scoped to one.
+type APIKeyStore interface {
+	CreateAPIKey(ctx context.Context, tenantID, keyID string, key auth.Key, scopes []string) error
+	APIKeyByPrefix(ctx context.Context, prefix string) (*auth.Record, error)
+	TouchAPIKey(ctx context.Context, keyID string) error
+	RevokeAPIKey(ctx context.Context, tenantID, keyID string) error
+}
+
 // Store is the full persistence surface.
 type Store interface {
 	TransactionStore
 	TenantStore
+	APIKeyStore
 }

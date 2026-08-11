@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -76,7 +77,8 @@ func TestScreenMetadataRejectsDenylistedFields(t *testing.T) {
 			t.Errorf("metadata key %q was accepted", key)
 			continue
 		}
-		if _, ok := err.(domain.SensitiveDataError); !ok {
+		var sde domain.SensitiveDataError
+		if !errors.As(err, &sde) {
 			t.Errorf("key %q returned %T, want SensitiveDataError", key, err)
 		}
 	}
@@ -87,8 +89,8 @@ func TestScreenMetadataRejectsCardNumberInValue(t *testing.T) {
 	if err == nil {
 		t.Fatal("card number in a metadata value was accepted")
 	}
-	sde, ok := err.(domain.SensitiveDataError)
-	if !ok {
+	var sde domain.SensitiveDataError
+	if !errors.As(err, &sde) {
 		t.Fatalf("got %T, want SensitiveDataError", err)
 	}
 	if sde.Path != "metadata.note" {
@@ -113,7 +115,8 @@ func TestScreenMetadataWalksNestedStructures(t *testing.T) {
 	if err == nil {
 		t.Fatal("card number nested in a slice was accepted")
 	}
-	if sde, ok := err.(domain.SensitiveDataError); ok && sde.Path != "metadata.items[1]" {
+	var sde domain.SensitiveDataError
+	if errors.As(err, &sde) && sde.Path != "metadata.items[1]" {
 		t.Errorf("path = %q, want metadata.items[1]", sde.Path)
 	}
 }

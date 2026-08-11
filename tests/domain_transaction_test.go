@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -55,8 +56,8 @@ func TestDebitEventValidateRejectsBadInput(t *testing.T) {
 			if err == nil {
 				t.Fatal("accepted invalid event")
 			}
-			ve, ok := err.(domain.ValidationError)
-			if !ok {
+			var ve domain.ValidationError
+			if !errors.As(err, &ve) {
 				t.Fatalf("got %T, want ValidationError", err)
 			}
 			if ve.Field != tc.field {
@@ -96,8 +97,8 @@ func TestCreditEventValidate(t *testing.T) {
 			if err == nil {
 				t.Fatal("accepted invalid credit event")
 			}
-			ve, ok := err.(domain.ValidationError)
-			if !ok {
+			var ve domain.ValidationError
+			if !errors.As(err, &ve) {
 				t.Fatalf("got %T, want ValidationError", err)
 			}
 			if ve.Field != tc.field {
@@ -129,9 +130,12 @@ func TestReversalCompletedEventValidate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := valid
 			tc.mutate(&e)
-			if err := e.Validate(); err == nil {
+			err := e.Validate()
+			if err == nil {
 				t.Fatal("accepted invalid event")
-			} else if ve, ok := err.(domain.ValidationError); !ok || ve.Field != tc.field {
+			}
+			var ve domain.ValidationError
+			if !errors.As(err, &ve) || ve.Field != tc.field {
 				t.Errorf("got %v, want ValidationError on %s", err, tc.field)
 			}
 		})

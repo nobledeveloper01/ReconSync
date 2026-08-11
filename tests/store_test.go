@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
 )
@@ -41,6 +43,10 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"PeekParkedCreditsIsTenantScoped", testPeekParkedTenantScoped},
 		{"PeekDoesNotRemove", testPeekDoesNotRemove},
 		{"DeleteParkedCreditIsIdempotent", testDeleteParkedIdempotent},
+		{"ReversalLifecycle", testReversalLifecycle},
+		{"ReversalCompletedRequiresPending", testReversalCompletedRequiresPending},
+		{"APIKeyRoundTrip", testAPIKeyRoundTrip},
+		{"APIKeyRevocation", testAPIKeyRevocation},
 		{"TenantIsolation", testTenantIsolation},
 	}
 
@@ -442,6 +448,137 @@ func testDeleteParkedIdempotent(t *testing.T, s store.Store) {
 		if err := s.DeleteParkedCredit(ctx, tenantA, "TX1"); err != nil {
 			t.Errorf("delete %d: %v", i, err)
 		}
+	}
+}
+
+// orphaned -> reversal_pending -> reversal_completed, the full §4.2 tail.
+func testReversalLifecycle(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	mustUpsert(t, s, newDebitTxn(tenantA, "TX1", -time.Minute))
+
+	claimed, err := s.ClaimExpired(ctx, time.Now().UTC(), 10)
+	if err != nil {
+		t.Fatalf("ClaimExpired: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].Status != domain.StatusOrphaned {
+		t.Fatalf("claimed %d, want 1 orphaned", len(claimed))
+	}
+
+	triggered := time.Now().UTC()
+	pending, err := s.MarkReversalPending(ctx, tenantA, "TX1", triggered)
+	if err != nil {
+		t.Fatalf("MarkReversalPending: %v", err)
+	}
+	if pending.Status != domain.StatusReversalPending {
+		t.Errorf("status = %s, want reversal_pending", pending.Status)
+	}
+	if pending.ReversalTriggeredAt == nil {
+		t.Error("reversal_triggered_at not set")
+	}
+
+	done, err := s.MarkReversalCompleted(ctx, tenantA, "TX1", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("MarkReversalCompleted: %v", err)
+	}
+	if done.Status != domain.StatusReversalCompleted {
+		t.Errorf("status = %s, want reversal_completed", done.Status)
+	}
+	if done.ReversalCompletedAt == nil {
+		t.Error("reversal_completed_at not set")
+	}
+	// Terminal: a replayed confirmation must not move it again.
+	if _, err := s.MarkReversalCompleted(ctx, tenantA, "TX1", time.Now().UTC()); err == nil {
+		t.Error("a second reversal confirmation was accepted")
+	}
+}
+
+func testReversalCompletedRequiresPending(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	mustUpsert(t, s, newDebitTxn(tenantA, "TX1", time.Minute))
+
+	// Still pending_debit: confirming a reversal nobody asked for must be refused.
+	_, err := s.MarkReversalCompleted(ctx, tenantA, "TX1", time.Now().UTC())
+	var ite domain.InvalidTransitionError
+	if !errors.As(err, &ite) {
+		t.Fatalf("got %v (%T), want InvalidTransitionError", err, err)
+	}
+
+	if _, err := s.MarkReversalCompleted(ctx, tenantA, "ABSENT", time.Now().UTC()); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown transaction: %v, want ErrNotFound", err)
+	}
+}
+
+func testAPIKeyRoundTrip(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+
+	key, err := auth.Generate(auth.EnvLive)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := s.CreateAPIKey(ctx, tenantA, "key_1", key, []string{"events:write"}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+
+	rec, err := s.APIKeyByPrefix(ctx, key.Prefix)
+	if err != nil {
+		t.Fatalf("APIKeyByPrefix: %v", err)
+	}
+	if rec.TenantID != tenantA || rec.ID != "key_1" {
+		t.Errorf("record = %+v, want tenant %s / key_1", rec, tenantA)
+	}
+	if rec.Environment != auth.EnvLive {
+		t.Errorf("environment = %q, want live", rec.Environment)
+	}
+	if len(rec.Scopes) != 1 || rec.Scopes[0] != "events:write" {
+		t.Errorf("scopes = %v, want [events:write]", rec.Scopes)
+	}
+	// Only the hash is stored — the secret must not be recoverable.
+	if rec.Hash != key.Hash || strings.Contains(rec.Hash, key.Secret) {
+		t.Error("stored hash does not match, or contains the plaintext secret")
+	}
+
+	if err := s.TouchAPIKey(ctx, "key_1"); err != nil {
+		t.Errorf("TouchAPIKey: %v", err)
+	}
+	if _, err := s.APIKeyByPrefix(ctx, "rs_live_zzzz"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown prefix: %v, want ErrNotFound", err)
+	}
+}
+
+func testAPIKeyRevocation(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+
+	key, err := auth.Generate(auth.EnvTest)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := s.CreateAPIKey(ctx, tenantA, "key_1", key, nil); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+
+	// Another tenant must not be able to revoke this key.
+	if err := s.RevokeAPIKey(ctx, tenantB, "key_1"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("cross-tenant revoke: %v, want ErrNotFound", err)
+	}
+
+	if err := s.RevokeAPIKey(ctx, tenantA, "key_1"); err != nil {
+		t.Fatalf("RevokeAPIKey: %v", err)
+	}
+	rec, err := s.APIKeyByPrefix(ctx, key.Prefix)
+	if err != nil {
+		t.Fatalf("APIKeyByPrefix: %v", err)
+	}
+	if rec.RevokedAt == nil {
+		t.Error("revoked_at not set after revocation")
+	}
+
+	// Revoking twice must not silently succeed and look like a fresh revocation.
+	if err := s.RevokeAPIKey(ctx, tenantA, "key_1"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("second revoke: %v, want ErrNotFound", err)
 	}
 }
 
