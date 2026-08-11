@@ -25,7 +25,9 @@ Early build. Implemented so far:
 | Reconciliation window rules (§3.2 B2) | Done |
 | Ingest pipeline: batching, backpressure (§4.3) | Done |
 | Correlation engine, incl. out-of-order credits (§3.2 A2) | Done |
-| Ingest API, webhook dispatcher, SDKs, dashboard | Not started |
+| API key auth: argon2id, per-environment scoping (§8.2) | Done |
+| Ingest HTTP API + health, readiness, metrics (§7.1) | Done |
+| Webhook dispatcher, SDKs, dashboard, admin CLI | Not started |
 
 ## Development
 
@@ -53,6 +55,8 @@ internal/rules/      reconciliation window resolution
 internal/store/      persistence port, in-memory and Postgres implementations
 internal/correlate/  matches credit legs to debits
 internal/pipeline/   bounded worker pool, batching, backpressure
+internal/auth/       API key issue and verification
+internal/ingest/     HTTP API, health, readiness, metrics
 migrations/          schema, applied forward and backward in tests
 tests/               the whole suite, exercising only the exported API
 ```
