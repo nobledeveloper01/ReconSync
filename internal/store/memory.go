@@ -28,7 +28,13 @@ type Memory struct {
 	// apiKeys by prefix
 	apiKeys map[string]*auth.Record
 
-	nextID int64
+	// webhook endpoints by id, and the delivery queue by id
+	endpoints  map[string]*WebhookEndpoint
+	deliveries map[int64]*DeliveryRecord
+	payloads   map[int64][]byte
+
+	nextID         int64
+	nextDeliveryID int64
 }
 
 // NewMemory returns an empty in-memory store.
@@ -39,6 +45,10 @@ func NewMemory() *Memory {
 		idem:     make(map[string]map[string]struct{}),
 		parked:   make(map[string]map[string]*domain.CreditEvent),
 		apiKeys:  make(map[string]*auth.Record),
+
+		endpoints:  make(map[string]*WebhookEndpoint),
+		deliveries: make(map[int64]*DeliveryRecord),
+		payloads:   make(map[int64][]byte),
 	}
 }
 
@@ -120,6 +130,10 @@ func (m *Memory) MarkReversalPending(_ context.Context, tenantID, transactionID 
 
 func (m *Memory) MarkReversalCompleted(_ context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
 	return m.markReversal(tenantID, transactionID, domain.StatusReversalCompleted, at)
+}
+
+func (m *Memory) MarkReversalFailed(_ context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
+	return m.markReversal(tenantID, transactionID, domain.StatusReversalFailed, at)
 }
 
 func (m *Memory) markReversal(tenantID, transactionID string, target domain.Status, at time.Time) (*domain.Transaction, error) {

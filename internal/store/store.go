@@ -48,6 +48,10 @@ type TransactionStore interface {
 	// MarkReversalCompleted records the customer confirming a reversal (§3.2 C2).
 	MarkReversalCompleted(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error)
 
+	// MarkReversalFailed records that delivery exhausted its retries and a human
+	// is now on the hook.
+	MarkReversalFailed(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error)
+
 	// Get returns one transaction scoped to the tenant.
 	Get(ctx context.Context, tenantID, transactionID string) (*domain.Transaction, error)
 
@@ -97,9 +101,93 @@ type APIKeyStore interface {
 	RevokeAPIKey(ctx context.Context, tenantID, keyID string) error
 }
 
+// WebhookEndpoint is a registered destination for a tenant's events.
+type WebhookEndpoint struct {
+	ID        string
+	TenantID  string
+	URL       string
+	SecretRef string // KMS reference, never the secret itself
+	Events    []string
+	Enabled   bool
+}
+
+// PendingDelivery is a webhook queued for its first attempt.
+type PendingDelivery struct {
+	TenantID      string
+	EndpointID    string
+	TransactionID string
+	EventType     string
+	Payload       []byte
+}
+
+// DueDelivery is a claimed delivery, joined to the endpoint that receives it.
+// The secret is referenced, not carried: resolving it is the dispatcher's job.
+type DueDelivery struct {
+	ID            int64
+	TenantID      string
+	EndpointID    string
+	TransactionID string
+	EventType     string
+	Payload       []byte
+	Attempt       int
+	URL           string
+	SecretRef     string
+}
+
+// DeliveryRecord is the delivery log entry shown in the dashboard.
+type DeliveryRecord struct {
+	ID            int64
+	TenantID      string
+	EndpointID    string
+	TransactionID string
+	EventType     string
+	Attempt       int
+	Status        string
+	ResponseCode  *int
+	ResponseBody  string
+	DurationMS    *int
+	NextRetryAt   *time.Time
+	CreatedAt     time.Time
+}
+
+// DeliveryOutcome is what an attempt decided, written back to the queue.
+type DeliveryOutcome struct {
+	Status       string
+	ResponseCode *int
+	ResponseBody string
+	DurationMS   int
+	NextRetryAt  *time.Time
+}
+
+// WebhookStore persists endpoints and the delivery queue.
+type WebhookStore interface {
+	CreateEndpoint(ctx context.Context, tenantID string, ep *WebhookEndpoint) error
+	ListEndpoints(ctx context.Context, tenantID string) ([]*WebhookEndpoint, error)
+
+	// EnqueueDelivery queues a webhook for immediate delivery.
+	EnqueueDelivery(ctx context.Context, tenantID string, d *PendingDelivery) (int64, error)
+
+	// ClaimDueDeliveries leases deliveries whose retry time has arrived.
+	//
+	// Not tenant-scoped, like ClaimExpired: the dispatcher sweeps every tenant.
+	// The lease pushes next_retry_at forward so a worker that dies mid-attempt
+	// releases its claim instead of stranding the delivery.
+	ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]*DueDelivery, error)
+
+	// RecordDeliveryOutcome writes back the result of one attempt.
+	RecordDeliveryOutcome(ctx context.Context, id int64, out DeliveryOutcome) error
+
+	// ListDeliveries returns a tenant's delivery log, newest first.
+	ListDeliveries(ctx context.Context, tenantID, status string, limit int) ([]*DeliveryRecord, error)
+
+	// ReplayDelivery returns a dead-lettered delivery to the queue (§11.5).
+	ReplayDelivery(ctx context.Context, tenantID string, id int64) error
+}
+
 // Store is the full persistence surface.
 type Store interface {
 	TransactionStore
 	TenantStore
 	APIKeyStore
+	WebhookStore
 }

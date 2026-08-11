@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -47,6 +48,10 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"ReversalCompletedRequiresPending", testReversalCompletedRequiresPending},
 		{"APIKeyRoundTrip", testAPIKeyRoundTrip},
 		{"APIKeyRevocation", testAPIKeyRevocation},
+		{"WebhookEndpoints", testWebhookEndpoints},
+		{"DeliveryQueue", testDeliveryQueue},
+		{"DeliveryLeasePreventsDoubleClaim", testDeliveryLease},
+		{"DeliveryReplay", testDeliveryReplay},
 		{"TenantIsolation", testTenantIsolation},
 	}
 
@@ -579,6 +584,182 @@ func testAPIKeyRevocation(t *testing.T, s store.Store) {
 	// Revoking twice must not silently succeed and look like a fresh revocation.
 	if err := s.RevokeAPIKey(ctx, tenantA, "key_1"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("second revoke: %v, want ErrNotFound", err)
+	}
+}
+
+func seedEndpoint(t *testing.T, s store.Store, tenantID, id string) {
+	t.Helper()
+	err := s.CreateEndpoint(context.Background(), tenantID, &store.WebhookEndpoint{
+		ID:        id,
+		TenantID:  tenantID,
+		URL:       "https://" + tenantID + ".example.com/hook",
+		SecretRef: "kms://test",
+		Enabled:   true,
+	})
+	if err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+}
+
+func testWebhookEndpoints(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	seedEndpoint(t, s, tenantA, "we_a")
+	seedEndpoint(t, s, tenantB, "we_b")
+
+	eps, err := s.ListEndpoints(ctx, tenantA)
+	if err != nil {
+		t.Fatalf("ListEndpoints: %v", err)
+	}
+	if len(eps) != 1 || eps[0].ID != "we_a" {
+		t.Fatalf("tenant A sees %d endpoints, want just we_a", len(eps))
+	}
+	// The secret itself is never stored, only a reference to it.
+	if eps[0].SecretRef != "kms://test" {
+		t.Errorf("secret_ref = %q", eps[0].SecretRef)
+	}
+
+	rogue := &store.WebhookEndpoint{ID: "we_x", TenantID: tenantB, URL: "https://x/", SecretRef: "kms://x"}
+	if err := s.CreateEndpoint(ctx, tenantA, rogue); !errors.Is(err, store.ErrTenantMismatch) {
+		t.Errorf("cross-tenant create: %v, want ErrTenantMismatch", err)
+	}
+}
+
+func testDeliveryQueue(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	seedEndpoint(t, s, tenantA, "we_a")
+
+	id, err := s.EnqueueDelivery(ctx, tenantA, &store.PendingDelivery{
+		TenantID:      tenantA,
+		EndpointID:    "we_a",
+		TransactionID: "TX1",
+		EventType:     "reversal.triggered",
+		Payload:       []byte(`{"event":"reversal.triggered"}`),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueDelivery: %v", err)
+	}
+
+	due, err := s.ClaimDueDeliveries(ctx, time.Now().UTC(), time.Minute, 10)
+	if err != nil {
+		t.Fatalf("ClaimDueDeliveries: %v", err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("claimed %d, want 1", len(due))
+	}
+	if due[0].ID != id || due[0].URL == "" || due[0].SecretRef != "kms://test" {
+		t.Errorf("claimed %+v, want the endpoint joined in", due[0])
+	}
+	// Compared as JSON, not bytes: Postgres stores this column as JSONB and
+	// normalises whitespace. That is safe because the signature is computed at
+	// send time over the bytes actually transmitted, never over what was queued.
+	var payload map[string]any
+	if err := json.Unmarshal(due[0].Payload, &payload); err != nil {
+		t.Fatalf("stored payload is not valid JSON: %v (%s)", err, due[0].Payload)
+	}
+	if payload["event"] != "reversal.triggered" {
+		t.Errorf("payload = %s", due[0].Payload)
+	}
+
+	code := 200
+	if err := s.RecordDeliveryOutcome(ctx, id, store.DeliveryOutcome{
+		Status: "delivered", ResponseCode: &code, ResponseBody: "ok", DurationMS: 12,
+	}); err != nil {
+		t.Fatalf("RecordDeliveryOutcome: %v", err)
+	}
+
+	delivered, err := s.ListDeliveries(ctx, tenantA, "delivered", 10)
+	if err != nil {
+		t.Fatalf("ListDeliveries: %v", err)
+	}
+	if len(delivered) != 1 || delivered[0].Attempt != 1 {
+		t.Fatalf("delivered = %+v, want one record at attempt 1", delivered)
+	}
+
+	// Tenant B must not see it, and an unknown id must not silently succeed.
+	if other, err := s.ListDeliveries(ctx, tenantB, "", 10); err != nil || len(other) != 0 {
+		t.Errorf("tenant B saw %d deliveries (err=%v)", len(other), err)
+	}
+	if err := s.RecordDeliveryOutcome(ctx, 999999, store.DeliveryOutcome{Status: "delivered"}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown delivery: %v, want ErrNotFound", err)
+	}
+}
+
+// The lease is what stops two dispatcher replicas delivering the same webhook.
+func testDeliveryLease(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	seedEndpoint(t, s, tenantA, "we_a")
+
+	if _, err := s.EnqueueDelivery(ctx, tenantA, &store.PendingDelivery{
+		TenantID: tenantA, EndpointID: "we_a", TransactionID: "TX1",
+		EventType: "reversal.triggered", Payload: []byte(`{}`),
+	}); err != nil {
+		t.Fatalf("EnqueueDelivery: %v", err)
+	}
+
+	now := time.Now().UTC()
+	first, err := s.ClaimDueDeliveries(ctx, now, time.Minute, 10)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("first claim got %d, want 1", len(first))
+	}
+
+	second, err := s.ClaimDueDeliveries(ctx, now, time.Minute, 10)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if len(second) != 0 {
+		t.Errorf("second claim got %d, want 0 — the lease did not hold", len(second))
+	}
+
+	// Once the lease lapses a worker that died mid-attempt releases its claim.
+	lapsed, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Minute), time.Minute, 10)
+	if err != nil {
+		t.Fatalf("claim after lease: %v", err)
+	}
+	if len(lapsed) != 1 {
+		t.Errorf("after the lease lapsed got %d, want 1 — a dead worker would strand it", len(lapsed))
+	}
+}
+
+func testDeliveryReplay(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	seedEndpoint(t, s, tenantA, "we_a")
+
+	id, err := s.EnqueueDelivery(ctx, tenantA, &store.PendingDelivery{
+		TenantID: tenantA, EndpointID: "we_a", TransactionID: "TX1",
+		EventType: "reversal.triggered", Payload: []byte(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueDelivery: %v", err)
+	}
+
+	// A pending delivery is not replayable — only a dead-lettered one.
+	if err := s.ReplayDelivery(ctx, tenantA, id); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("replay of a pending delivery: %v, want ErrNotFound", err)
+	}
+
+	if err := s.RecordDeliveryOutcome(ctx, id, store.DeliveryOutcome{Status: "dead_letter", DurationMS: 5}); err != nil {
+		t.Fatalf("RecordDeliveryOutcome: %v", err)
+	}
+	if err := s.ReplayDelivery(ctx, tenantB, id); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("cross-tenant replay: %v, want ErrNotFound", err)
+	}
+	if err := s.ReplayDelivery(ctx, tenantA, id); err != nil {
+		t.Fatalf("ReplayDelivery: %v", err)
+	}
+
+	due, err := s.ClaimDueDeliveries(ctx, time.Now().UTC(), time.Minute, 10)
+	if err != nil {
+		t.Fatalf("ClaimDueDeliveries: %v", err)
+	}
+	if len(due) != 1 || due[0].Attempt != 0 {
+		t.Errorf("after replay: %d due, attempt %v — want 1 at attempt 0", len(due), due)
 	}
 }
 

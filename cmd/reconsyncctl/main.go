@@ -1,0 +1,193 @@
+// Command reconsyncctl is the admin CLI (§6.3).
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/nobledeveloper01/ReconSync/internal/auth"
+	"github.com/nobledeveloper01/ReconSync/internal/store"
+)
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+const usage = `reconsyncctl — ReconSync admin CLI
+
+Usage:
+  reconsyncctl doctor                          check the deployment is sound
+  reconsyncctl tenant create --id ID [--name N] [--env test|live]
+  reconsyncctl keys create --tenant ID [--env test|live]
+
+Reads RECONSYNC_DATABASE_URL from the environment.
+`
+
+func run(args []string) error {
+	if len(args) == 0 {
+		fmt.Print(usage)
+		return errors.New("no command given")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	switch args[0] {
+	case "doctor":
+		return doctor(ctx)
+	case "tenant":
+		if len(args) > 1 && args[1] == "create" {
+			return tenantCreate(ctx, args[2:])
+		}
+	case "keys":
+		if len(args) > 1 && args[1] == "create" {
+			return keysCreate(ctx, args[2:])
+		}
+	case "help", "-h", "--help":
+		fmt.Print(usage)
+		return nil
+	}
+
+	fmt.Print(usage)
+	return fmt.Errorf("unknown command %q", args[0])
+}
+
+func connect(ctx context.Context) (*pgxpool.Pool, error) {
+	url := os.Getenv("RECONSYNC_DATABASE_URL")
+	if url == "" {
+		return nil, errors.New("RECONSYNC_DATABASE_URL is required")
+	}
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	return pool, nil
+}
+
+// doctor checks the things that make an install fail in ways the operator
+// cannot diagnose from the error alone (§6.3).
+func doctor(ctx context.Context) error {
+	pool, err := connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		return fmt.Errorf("database unreachable: %w", err)
+	}
+	fmt.Println("✓ database reachable")
+
+	tables := []string{"tenants", "api_keys", "transactions", "pending_credits",
+		"reconciliation_rules", "webhook_endpoints", "webhook_deliveries", "audit_records"}
+	for _, table := range tables {
+		var exists bool
+		err := pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+			 WHERE table_schema='public' AND table_name=$1)`, table).Scan(&exists)
+		if err != nil {
+			return fmt.Errorf("check table %s: %w", table, err)
+		}
+		if !exists {
+			return fmt.Errorf("table %q is missing — run the migrations in migrations/", table)
+		}
+	}
+	fmt.Printf("✓ schema present (%d tables)\n", len(tables))
+
+	// Clock skew breaks webhook signature verification with an error message
+	// that tells the operator nothing, so it is worth checking explicitly.
+	var dbNow time.Time
+	if err := pool.QueryRow(ctx, `SELECT now()`).Scan(&dbNow); err != nil {
+		return fmt.Errorf("read database time: %w", err)
+	}
+	skew := time.Since(dbNow)
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > 5*time.Second {
+		return fmt.Errorf("clock skew between this host and the database is %s — "+
+			"webhook signatures and reconciliation windows will misbehave", skew.Round(time.Millisecond))
+	}
+	fmt.Printf("✓ clock skew %s\n", skew.Round(time.Millisecond))
+
+	fmt.Println("\nreconsyncctl doctor: all checks passed")
+	return nil
+}
+
+func tenantCreate(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("tenant create", flag.ContinueOnError)
+	id := fs.String("id", "", "tenant id, e.g. tnt_acme")
+	name := fs.String("name", "", "display name (defaults to the id)")
+	env := fs.String("env", "test", "test or live")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *id == "" {
+		return errors.New("--id is required")
+	}
+	if *env != "test" && *env != "live" {
+		return fmt.Errorf("--env must be test or live, got %q", *env)
+	}
+	if *name == "" {
+		*name = *id
+	}
+
+	pool, err := connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	if err := store.NewPostgres(pool).EnsureTenant(ctx, *id, *name, *env); err != nil {
+		return err
+	}
+	fmt.Printf("tenant %s ready (%s)\n", *id, *env)
+	return nil
+}
+
+func keysCreate(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("keys create", flag.ContinueOnError)
+	tenant := fs.String("tenant", "", "tenant id")
+	env := fs.String("env", "test", "test or live")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *tenant == "" {
+		return errors.New("--tenant is required")
+	}
+
+	environment := auth.Environment(*env)
+	if !environment.Valid() {
+		return fmt.Errorf("--env must be test or live, got %q", *env)
+	}
+
+	key, err := auth.Generate(environment)
+	if err != nil {
+		return err
+	}
+
+	pool, err := connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	keyID := fmt.Sprintf("key_%d", time.Now().UnixNano())
+	if err := store.NewPostgres(pool).CreateAPIKey(ctx, *tenant, keyID, key, nil); err != nil {
+		return err
+	}
+
+	// Shown once and never again: only the prefix and the hash are stored.
+	fmt.Printf("key id: %s\nprefix: %s\nsecret: %s\n\n", keyID, key.Prefix, key.Secret)
+	fmt.Println("Store the secret now — it cannot be retrieved later.")
+	return nil
+}

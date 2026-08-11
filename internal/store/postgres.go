@@ -209,6 +209,18 @@ func (p *Postgres) MarkReversalCompleted(ctx context.Context, tenantID, transact
 		tenantID, transactionID, string(target), at, allowedSources(target))
 }
 
+// MarkReversalFailed records that delivery exhausted its retries.
+func (p *Postgres) MarkReversalFailed(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
+	target := domain.StatusReversalFailed
+	return p.applyTransition(ctx, tenantID, transactionID, target, `
+		UPDATE transactions
+		SET status = $3,
+		    updated_at = $4
+		WHERE tenant_id = $1 AND transaction_id = $2 AND status = ANY($5)
+		RETURNING `+txnColumns,
+		tenantID, transactionID, string(target), at, allowedSources(target))
+}
+
 // allowedSources renders the legal predecessors of a state for a SQL guard.
 func allowedSources(target domain.Status) []string {
 	sources := domain.SourcesFor(target)
