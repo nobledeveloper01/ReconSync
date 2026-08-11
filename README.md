@@ -27,7 +27,9 @@ Early build. Implemented so far:
 | Correlation engine, incl. out-of-order credits (§3.2 A2) | Done |
 | API key auth: argon2id, per-environment scoping (§8.2) | Done |
 | Ingest HTTP API + health, readiness, metrics (§7.1) | Done |
-| Webhook dispatcher, SDKs, dashboard, admin CLI | Not started |
+| Webhook signing, retry policy, SSRF guard (§7.2, §10) | Done |
+| Webhook delivery queue + dead-letter replay | Not started |
+| Detection scheduler loop, server binary, SDKs, dashboard | Not started |
 
 ## Development
 
@@ -57,6 +59,7 @@ internal/correlate/  matches credit legs to debits
 internal/pipeline/   bounded worker pool, batching, backpressure
 internal/auth/       API key issue and verification
 internal/ingest/     HTTP API, health, readiness, metrics
+internal/webhook/    payload signing, retry policy, SSRF-guarded client
 migrations/          schema, applied forward and backward in tests
 tests/               the whole suite, exercising only the exported API
 ```
