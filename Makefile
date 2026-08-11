@@ -28,6 +28,11 @@ race: ## Race detector only
 vet: ## go vet
 	go vet ./...
 
+crosscheck: ## Build for the platform CI uses (dev is often arm64, CI is amd64)
+	@echo "building linux/amd64"
+	GOOS=linux GOARCH=amd64 go build ./...
+	GOOS=linux GOARCH=amd64 go vet ./...
+
 fmt: ## Format
 	gofmt -w .
 
@@ -56,4 +61,4 @@ migrate-up: ## Apply migrations to TEST_DB
 migrate-down: ## Roll migrations back on TEST_DB
 	psql -q -v ON_ERROR_STOP=1 -d $(TEST_DB) -f $(MIGRATIONS)/0001_init.down.sql
 
-ci: fmt vet test-integration ## What CI runs
+ci: fmt vet crosscheck lint test-integration ## What CI runs
