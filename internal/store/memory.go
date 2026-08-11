@@ -20,6 +20,9 @@ type Memory struct {
 	// idem[tenantID][idempotencyKey]
 	idem map[string]map[string]struct{}
 
+	// parked[tenantID][transactionID] — credits awaiting their debit
+	parked map[string]map[string]*domain.CreditEvent
+
 	nextID int64
 }
 
@@ -29,6 +32,7 @@ func NewMemory() *Memory {
 		tenants:  make(map[string]struct{}),
 		byTenant: make(map[string]map[string]*domain.Transaction),
 		idem:     make(map[string]map[string]struct{}),
+		parked:   make(map[string]map[string]*domain.CreditEvent),
 	}
 }
 
@@ -102,6 +106,48 @@ func (m *Memory) ApplyCredit(_ context.Context, tenantID, transactionID string, 
 
 	out := *stored
 	return &out, nil
+}
+
+func (m *Memory) ParkCredit(_ context.Context, tenantID string, ev *domain.CreditEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ev.TenantID != tenantID {
+		return ErrTenantMismatch
+	}
+	if m.parked[tenantID] == nil {
+		m.parked[tenantID] = make(map[string]*domain.CreditEvent)
+	}
+	if _, exists := m.parked[tenantID][ev.TransactionID]; exists {
+		return nil // first verdict wins
+	}
+	cp := *ev
+	m.parked[tenantID][ev.TransactionID] = &cp
+	return nil
+}
+
+func (m *Memory) PeekParkedCredits(_ context.Context, tenantID string, transactionIDs []string) ([]*domain.CreditEvent, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var out []*domain.CreditEvent
+	for _, id := range transactionIDs {
+		ev, ok := m.parked[tenantID][id]
+		if !ok {
+			continue
+		}
+		cp := *ev
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+func (m *Memory) DeleteParkedCredit(_ context.Context, tenantID, transactionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	delete(m.parked[tenantID], transactionID)
+	return nil
 }
 
 func (m *Memory) Get(_ context.Context, tenantID, transactionID string) (*domain.Transaction, error) {

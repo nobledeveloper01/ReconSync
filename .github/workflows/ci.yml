@@ -41,11 +41,11 @@ jobs:
           version: latest
 
       - name: Tests
-        run: go test -race -cover ./...
+        run: go test -race -coverpkg=./internal/... ./tests/...
 
       # Blocking gate (§8.1): tenant B must never reach tenant A's data.
       - name: Tenant isolation
-        run: go test -race ./internal/store/... -run 'TenantIsolation'
+        run: go test -race ./tests/... -run 'Store/TenantIsolation' -v
 
   security:
     runs-on: ubuntu-latest

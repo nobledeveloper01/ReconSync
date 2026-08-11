@@ -22,7 +22,10 @@ Early build. Implemented so far:
 | Postgres schema + migrations (§5) | Done, applied and reverted against PG 16 |
 | Store layer, tenant-scoped (§8.1) | Done — in-memory and Postgres, one shared conformance suite |
 | Detection sweep with `SKIP LOCKED` (§4.4) | Done, verified across 5 concurrent schedulers |
-| Ingest API, pipeline, dispatcher, SDKs, dashboard | Not started |
+| Reconciliation window rules (§3.2 B2) | Done |
+| Ingest pipeline: batching, backpressure (§4.3) | Done |
+| Correlation engine, incl. out-of-order credits (§3.2 A2) | Done |
+| Ingest API, webhook dispatcher, SDKs, dashboard | Not started |
 
 ## Development
 
@@ -45,7 +48,11 @@ make migrate-down           # roll it back
 ## Layout
 
 ```text
-internal/domain/   transaction types + state machine (no infrastructure deps)
-internal/store/    persistence port, in-memory and Postgres implementations
-migrations/        schema, applied forward and backward in tests
+internal/domain/     transaction types + state machine (no infrastructure deps)
+internal/rules/      reconciliation window resolution
+internal/store/      persistence port, in-memory and Postgres implementations
+internal/correlate/  matches credit legs to debits
+internal/pipeline/   bounded worker pool, batching, backpressure
+migrations/          schema, applied forward and backward in tests
+tests/               the whole suite, exercising only the exported API
 ```

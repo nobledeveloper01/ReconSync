@@ -47,6 +47,24 @@ type TransactionStore interface {
 	// ListByStatus returns a tenant's transactions in a given state, newest first.
 	ListByStatus(ctx context.Context, tenantID string, status domain.Status, limit int) ([]*domain.Transaction, error)
 
+	// ParkCredit stores a credit whose debit has not arrived yet (§3.2 A2).
+	// Idempotent per transaction: the first verdict wins, so a duplicate cannot
+	// overwrite it.
+	ParkCredit(ctx context.Context, tenantID string, ev *domain.CreditEvent) error
+
+	// PeekParkedCredits returns parked credits without removing them.
+	//
+	// Reading and removing are deliberately separate. If a read removed the
+	// credit, a failed apply would drop it permanently — the debit's own sweep
+	// may already have run, so nobody would ever apply it and the transaction
+	// would be reversed despite its credit having succeeded.
+	PeekParkedCredits(ctx context.Context, tenantID string, transactionIDs []string) ([]*domain.CreditEvent, error)
+
+	// DeleteParkedCredit removes a parked credit once it has been resolved.
+	// Idempotent: deleting an absent credit is not an error, so two workers
+	// racing the same credit both succeed.
+	DeleteParkedCredit(ctx context.Context, tenantID, transactionID string) error
+
 	// ClaimExpired atomically marks open transactions whose window has closed as
 	// orphaned and returns them.
 	//

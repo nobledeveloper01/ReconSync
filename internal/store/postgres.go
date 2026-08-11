@@ -25,6 +25,10 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres {
 	return &Postgres{pool: pool}
 }
 
+// applyCreditAttempts bounds the retry when the update and the follow-up
+// classification read see different snapshots.
+const applyCreditAttempts = 3
+
 // txnColumns is the read projection, in the order scanTransaction expects.
 const txnColumns = `id, tenant_id, transaction_id, idempotency_key, transaction_type,
 	provider, amount_minor, currency, status, debit_at, credit_at,
@@ -169,32 +173,102 @@ func (p *Postgres) ApplyCredit(ctx context.Context, tenantID, transactionID stri
 	// The status guard rides in the same statement as the write, so a credit
 	// racing the detection sweep either wins cleanly or is rejected — it can
 	// never overwrite a state the machine forbids.
-	row := p.pool.QueryRow(ctx, `
-		UPDATE transactions
-		SET status = $3,
-		    credit_at = $4,
-		    detected_at = CASE WHEN $3 = 'orphaned' THEN now() ELSE detected_at END,
-		    updated_at = now()
-		WHERE tenant_id = $1 AND transaction_id = $2 AND status = ANY($5)
-		RETURNING `+txnColumns,
-		tenantID, transactionID, string(target), creditAt, allowed)
+	for attempt := 0; attempt < applyCreditAttempts; attempt++ {
+		row := p.pool.QueryRow(ctx, `
+			UPDATE transactions
+			SET status = $3,
+			    credit_at = $4,
+			    detected_at = CASE WHEN $3 = 'orphaned' THEN now() ELSE detected_at END,
+			    updated_at = now()
+			WHERE tenant_id = $1 AND transaction_id = $2 AND status = ANY($5)
+			RETURNING `+txnColumns,
+			tenantID, transactionID, string(target), creditAt, allowed)
 
-	t, err := scanTransaction(row)
-	if err == nil {
-		return t, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("apply credit: %w", err)
+		t, err := scanTransaction(row)
+		if err == nil {
+			return t, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("apply credit: %w", err)
+		}
+
+		// No row matched: either it does not exist, or the guard rejected it.
+		current, getErr := p.Get(ctx, tenantID, transactionID)
+		if getErr != nil {
+			return nil, getErr // ErrNotFound: the debit has not arrived
+		}
+
+		// The row is now in a state the target is reachable from, so the UPDATE
+		// and this read saw different snapshots — the debit landed, or the sweep
+		// moved it, in between. Reporting an invalid transition here would
+		// discard a credit that is perfectly legal to apply, so retry instead.
+		if domain.CanTransition(current.Status, target) {
+			continue
+		}
+		return nil, domain.InvalidTransitionError{From: current.Status, To: target}
 	}
 
-	// No row matched: either it does not exist, or the guard rejected it. A
-	// second read only classifies the error, so a concurrent change here costs
-	// message accuracy, not correctness.
-	current, getErr := p.Get(ctx, tenantID, transactionID)
-	if getErr != nil {
-		return nil, getErr
+	return nil, fmt.Errorf("apply credit %s: gave up after %d contended attempts",
+		transactionID, applyCreditAttempts)
+}
+
+func (p *Postgres) ParkCredit(ctx context.Context, tenantID string, ev *domain.CreditEvent) error {
+	if ev.TenantID != tenantID {
+		return ErrTenantMismatch
 	}
-	return nil, domain.InvalidTransitionError{From: current.Status, To: target}
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO pending_credits (
+			tenant_id, transaction_id, idempotency_key, credit_at, provider_reference, status)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (tenant_id, transaction_id) DO NOTHING`,
+		tenantID, ev.TransactionID, ev.IdempotencyKey, ev.CreditAt, ev.ProviderReference, string(ev.Status))
+	if err != nil {
+		return fmt.Errorf("park credit: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) DeleteParkedCredit(ctx context.Context, tenantID, transactionID string) error {
+	_, err := p.pool.Exec(ctx,
+		`DELETE FROM pending_credits WHERE tenant_id = $1 AND transaction_id = $2`,
+		tenantID, transactionID)
+	if err != nil {
+		return fmt.Errorf("delete parked credit: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) PeekParkedCredits(ctx context.Context, tenantID string, transactionIDs []string) ([]*domain.CreditEvent, error) {
+	if len(transactionIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := p.pool.Query(ctx, `
+		SELECT transaction_id, idempotency_key, credit_at, provider_reference, status
+		FROM pending_credits
+		WHERE tenant_id = $1 AND transaction_id = ANY($2)`,
+		tenantID, transactionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("peek parked credits: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*domain.CreditEvent
+	for rows.Next() {
+		ev := &domain.CreditEvent{TenantID: tenantID}
+		var status string
+		if err := rows.Scan(&ev.TransactionID, &ev.IdempotencyKey, &ev.CreditAt, &ev.ProviderReference, &status); err != nil {
+			return nil, fmt.Errorf("scan parked credit: %w", err)
+		}
+		ev.Status = domain.CreditStatus(status)
+		if !ev.Status.Valid() {
+			return nil, fmt.Errorf("parked credit %s: unrecognised status %q", ev.TransactionID, status)
+		}
+		out = append(out, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate parked credits: %w", err)
+	}
+	return out, nil
 }
 
 func (p *Postgres) Get(ctx context.Context, tenantID, transactionID string) (*domain.Transaction, error) {
