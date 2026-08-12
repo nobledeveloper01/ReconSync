@@ -419,6 +419,36 @@ Counts are aggregated in the database; only transactions that actually reached
 `orphaned` are fetched in full. A healthy tenant's millions of settled
 transactions never cross the wire to be counted.
 
+### Shadow mode — what it would have caught
+
+Nobody buys monitoring for hypothetical failures. So before going live, replay
+your last 90 days through `POST /v1/events/bulk` with `"backfill": true` and ask
+`GET /v1/reports/exposure?scope=backfill`. The answer is a sentence: *20
+customers out of pocket, ₦1.3M, oldest 21 days.*
+
+A replay of real history is safe because backfilled transactions are correlated
+and stored but **never notify** — the same rule that has been in the ingest path
+since the beginning. A verified run of 300 historical transactions found 20
+orphans and fired zero webhooks.
+
+Three decisions keep the headline honest:
+
+- **Amounts are never summed across currencies.** ₦18.2M plus $4,000 is not a
+  number, and a single combined figure would be the most quotable wrong thing in
+  the product. Every currency is its own line.
+- **Customers are counted distinctly.** Two failures for one customer is one
+  customer out of pocket. Counting transactions and calling them customers would
+  inflate the blast radius.
+- **Unresolved money is reported beside the exposure, not inside it.** A
+  transaction we could not establish either way may be perfectly fine. It is
+  still counted — the customer's money is still out — but the split says how
+  much of the total we can actually vouch for.
+
+Ages are bucketed with the worst band first, because a debit that has been
+outstanding for a month is not a backlog item. `scope=live` asks the same
+question of production traffic, which is the version worth putting on a
+dashboard.
+
 ### The provider scorecard — which rail is actually costing you
 
 `GET /v1/reports/providers` ranks a tenant's rails worst-first: how much each
@@ -763,6 +793,7 @@ Because payloads come in more than one shape, a receiver should switch on
 | GET | `/v1/audit/verify` | Recompute the tenant's audit chain and report any tampering. |
 | GET | `/v1/reports/reversal-compliance` | Prove every reversal met its deadline. `format=json\|csv`. |
 | GET | `/v1/reports/providers` | Rank your rails by failure rate and settlement latency. |
+| GET | `/v1/reports/exposure` | How much customer money is outstanding. `scope=all\|backfill\|live`. |
 | POST | `/v1/fire-drill` | Send a synthetic reversal to your own endpoints and report what they did. |
 | POST | `/v1/reversals/{id}/claim` | Take the exclusive right to reverse. `409` if someone already holds it. |
 | POST | `/v1/reversals/{id}/claim/release` | Free a claim whose holder died before reversing. |
@@ -958,6 +989,7 @@ is delivered to the registered endpoint.
 | Fire drill — `POST /v1/fire-drill` | Done |
 | Reversal claim ledger — exactly-once interlock | Done |
 | Provider scorecard — `GET /v1/reports/providers` | Done — per-deployment, not an industry benchmark |
+| Shadow mode — replay history, report exposure | Done |
 | Provider corroboration — ask the rail instead of inferring from silence | Done |
 | Confidence score + evidence trail on every verdict | Done |
 | Audit hash chain + `GET /v1/audit/verify` | Done |

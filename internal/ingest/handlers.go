@@ -431,6 +431,47 @@ func (s *Server) handleProviderScorecard(w http.ResponseWriter, r *http.Request)
 	s.writeJSON(w, r, http.StatusOK, report.ScoreProviders(principal.TenantID, from, to, stats))
 }
 
+// handleExposure answers the question a fintech evaluating ReconSync actually
+// has: how much of our customers' money is sitting unreturned right now.
+//
+// With scope=backfill it is shadow mode — replay the last 90 days through
+// /v1/events/bulk with backfill set, then ask this. Backfilled transactions are
+// correlated and stored but never notify, so a replay of real history cannot
+// fire a single webhook at anyone.
+func (s *Server) handleExposure(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if s.reports == nil {
+		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
+			"reporting is not configured on this deployment", "")
+		return
+	}
+
+	scope := report.ScopeAll
+	if raw := r.URL.Query().Get("scope"); raw != "" {
+		scope = report.Scope(raw)
+	}
+	// An unrecognised scope is rejected rather than falling back to "all",
+	// which would silently overstate the exposure.
+	if !report.ValidScope(scope) {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+			"scope must be all, backfill or live", "scope")
+		return
+	}
+
+	now := s.now().UTC()
+	totals, bands, err := s.reports.Exposure(r.Context(), principal.TenantID, scope, now)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK,
+		report.ComputeExposure(principal.TenantID, scope, totals, bands, now))
+}
+
 // reportPeriod parses the from/to window shared by the reports, defaulting to
 // the last 30 days so the common case needs no parameters.
 func (s *Server) reportPeriod(w http.ResponseWriter, r *http.Request) (from, to time.Time, ok bool) {

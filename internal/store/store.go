@@ -363,6 +363,11 @@ type ReportStore interface {
 	// duplicating it here would only add a conversion with nothing to say.
 	// report imports nothing but domain, so this cannot cycle.
 	ProviderStats(ctx context.Context, tenantID string, from, to time.Time) ([]report.ProviderStat, error)
+
+	// Exposure totals a tenant's outstanding position per currency, and the
+	// same broken down by age. Two results rather than one because a distinct
+	// customer count cannot be summed across age brackets.
+	Exposure(ctx context.Context, tenantID string, scope report.Scope, now time.Time) ([]report.ExposureTotal, []report.AgeBand, error)
 }
 
 // Store is the full persistence surface.

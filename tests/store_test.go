@@ -76,6 +76,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"CountByStatus", testCountByStatus},
 		{"ListReversalCandidates", testListReversalCandidates},
 		{"ProviderStats", testProviderStats},
+		{"Exposure", testExposure},
 		{"TenantIsolation", testTenantIsolation},
 	}
 
