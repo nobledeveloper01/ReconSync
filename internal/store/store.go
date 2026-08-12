@@ -12,6 +12,7 @@ import (
 
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/rules"
 )
 
 var (
@@ -184,10 +185,18 @@ type WebhookStore interface {
 	ReplayDelivery(ctx context.Context, tenantID string, id int64) error
 }
 
+// RuleStore persists the reconciliation windows a tenant has configured (§3.2 B2).
+type RuleStore interface {
+	ListRules(ctx context.Context, tenantID string) ([]rules.Rule, error)
+	CreateRule(ctx context.Context, tenantID string, r *rules.Rule) (int64, error)
+	DeleteRule(ctx context.Context, tenantID string, id int64) error
+}
+
 // Store is the full persistence surface.
 type Store interface {
 	TransactionStore
 	TenantStore
 	APIKeyStore
 	WebhookStore
+	RuleStore
 }

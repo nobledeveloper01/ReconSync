@@ -33,6 +33,9 @@ Usage:
   reconsyncctl endpoints create --tenant ID --url URL [--events a,b]
   reconsyncctl endpoints list --tenant ID
   reconsyncctl endpoints test --tenant ID --id ENDPOINT_ID
+  reconsyncctl rules create --tenant ID --window SECONDS [--type T] [--provider P]
+  reconsyncctl rules list --tenant ID
+  reconsyncctl rules delete --tenant ID --id RULE_ID
 
 Reads RECONSYNC_DATABASE_URL from the environment.
 "endpoints test" also needs RECONSYNC_WEBHOOK_SECRET to sign the payload.
@@ -72,6 +75,13 @@ func run(args []string) error {
 			"create": endpointsCreate,
 			"list":   endpointsList,
 			"test":   endpointsTest,
+		})
+
+	case "rules":
+		return dispatch(ctx, "rules", args[1:], map[string]subcommand{
+			"create": rulesCreate,
+			"list":   rulesList,
+			"delete": rulesDelete,
 		})
 	}
 

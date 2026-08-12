@@ -154,8 +154,11 @@ Precedence is: highest priority wins, then the more specific rule, then the lowe
 rule ID. That last tiebreak matters — without it, the window a transaction gets
 could flip between scans depending on row ordering.
 
-> Currently the rule provider is stubbed to defaults in the server binary.
-> Loading rules from the database is not yet implemented.
+Rules are stored per tenant and read on the ingest path, so they are cached for
+15 seconds rather than queried per debit — a rule change lands within that window
+without a restart. If the rules query fails, the last known set is served rather
+than rejecting the debit: losing reconciliation coverage over a configuration
+read would be the wrong trade.
 
 ### `internal/store` — persistence, tenant-scoped by construction
 
@@ -304,6 +307,13 @@ go run ./cmd/reconsyncctl endpoints test   --tenant tnt_acme --id we_...
 `endpoints test` sends a signed `endpoint.test` payload to the real URL. Nobody
 otherwise exercises the reversal path until the first incident, which is the
 worst possible time to discover the receiver is broken.
+
+Set a reconciliation window. Without a rule, everything gets the 300s default:
+
+```bash
+go run ./cmd/reconsyncctl rules create --tenant tnt_acme --type transfer --window 120
+go run ./cmd/reconsyncctl rules list --tenant tnt_acme
+```
 
 `doctor` checks database reachability, that every table exists, and **clock
 skew** — skew breaks webhook signature verification with an error message that
@@ -533,14 +543,14 @@ is delivered to the registered endpoint.
 | Postgres schema + migrations | Done |
 | Store layer, tenant-scoped | Done — two implementations, one conformance suite |
 | Detection sweep with `SKIP LOCKED` | Done |
-| Reconciliation window rules | Done, in-memory rule sets only |
+| Reconciliation window rules, loaded from the database | Done |
 | Ingest pipeline: batching, backpressure | Done |
 | Correlation, incl. out-of-order credits | Done |
 | API key auth: argon2id, per-environment | Done |
 | Ingest HTTP API, health, readiness, metrics | Done |
 | Webhook signing, retries, DLQ, SSRF guard | Done |
 | Server binary and admin CLI | Done |
-| Rules loaded from the database | **Not started** — provider stubbed to defaults |
-| Endpoint management API | **Not started** — endpoints are inserted directly |
+| Rules and endpoints managed via `reconsyncctl` | Done |
+| Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |
 | Audit hash chain and signed checkpoints | **Not started** |
 | Dashboard, SDKs, bulk reporting | **Not started** |

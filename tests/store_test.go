@@ -12,6 +12,7 @@ import (
 
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/rules"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
 )
 
@@ -52,6 +53,9 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"DeliveryQueue", testDeliveryQueue},
 		{"DeliveryLeasePreventsDoubleClaim", testDeliveryLease},
 		{"DeliveryReplay", testDeliveryReplay},
+		{"RulesRoundTrip", testRulesRoundTrip},
+		{"RulesMatchAnyIsStoredAsNull", testRulesMatchAny},
+		{"RulesAreTenantScoped", testRulesTenantScoped},
 		{"TenantIsolation", testTenantIsolation},
 	}
 
@@ -760,6 +764,132 @@ func testDeliveryReplay(t *testing.T, s store.Store) {
 	}
 	if len(due) != 1 || due[0].Attempt != 0 {
 		t.Errorf("after replay: %d due, attempt %v — want 1 at attempt 0", len(due), due)
+	}
+}
+
+func testRulesRoundTrip(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+
+	if got, err := s.ListRules(ctx, tenantA); err != nil || len(got) != 0 {
+		t.Fatalf("ListRules on a fresh tenant = %v, %v; want empty", got, err)
+	}
+
+	id, err := s.CreateRule(ctx, tenantA, &rules.Rule{
+		TransactionType: "transfer",
+		Provider:        "paystack",
+		Currency:        "NGN",
+		MinAmountMinor:  rules.Amount(1000),
+		MaxAmountMinor:  rules.Amount(500000),
+		WindowSeconds:   120,
+		Action:          rules.ActionInvestigate,
+		Priority:        5,
+		Enabled:         true,
+	})
+	if err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+
+	got, err := s.ListRules(ctx, tenantA)
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("listed %d rules, want 1", len(got))
+	}
+
+	r := got[0]
+	if r.ID != id {
+		t.Errorf("id = %d, want %d", r.ID, id)
+	}
+	if r.TransactionType != "transfer" || r.Provider != "paystack" || r.Currency != "NGN" {
+		t.Errorf("criteria = %+v", r)
+	}
+	if r.WindowSeconds != 120 || r.Action != rules.ActionInvestigate || r.Priority != 5 {
+		t.Errorf("window/action/priority = %d/%s/%d", r.WindowSeconds, r.Action, r.Priority)
+	}
+	if r.MinAmountMinor == nil || *r.MinAmountMinor != 1000 {
+		t.Errorf("min amount = %v, want 1000", r.MinAmountMinor)
+	}
+	if r.MaxAmountMinor == nil || *r.MaxAmountMinor != 500000 {
+		t.Errorf("max amount = %v, want 500000", r.MaxAmountMinor)
+	}
+
+	// The stored rule must resolve the same way the in-memory one does.
+	if res := rules.NewSet(got).Resolve(&domain.Transaction{
+		TransactionType: "transfer", Provider: "paystack", Currency: "NGN", AmountMinor: 5000,
+	}); res.Window != 120*time.Second {
+		t.Errorf("resolved window = %s, want 120s", res.Window)
+	}
+
+	if err := s.DeleteRule(ctx, tenantA, id); err != nil {
+		t.Fatalf("DeleteRule: %v", err)
+	}
+	if err := s.DeleteRule(ctx, tenantA, id); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("second delete: %v, want ErrNotFound", err)
+	}
+	if got, _ := s.ListRules(ctx, tenantA); len(got) != 0 {
+		t.Errorf("listed %d rules after delete, want 0", len(got))
+	}
+}
+
+// An empty criterion means "matches anything". Currency matters most: the column
+// is CHAR(3), so an empty string would be stored as three spaces and match
+// nothing ever.
+func testRulesMatchAny(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+
+	if _, err := s.CreateRule(ctx, tenantA, &rules.Rule{WindowSeconds: 90, Enabled: true}); err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+
+	got, err := s.ListRules(ctx, tenantA)
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("listed %d rules, want 1", len(got))
+	}
+	for _, field := range []struct{ name, value string }{
+		{"transaction_type", got[0].TransactionType},
+		{"provider", got[0].Provider},
+		{"currency", got[0].Currency},
+	} {
+		if field.value != "" {
+			t.Errorf("%s round-tripped as %q, want empty", field.name, field.value)
+		}
+	}
+	if got[0].Action != rules.ActionAutoReverse {
+		t.Errorf("action defaulted to %q, want auto_reverse", got[0].Action)
+	}
+
+	// And it must actually match a transaction with unrelated criteria.
+	res := rules.NewSet(got).Resolve(&domain.Transaction{
+		TransactionType: "bill_payment", Provider: "flutterwave", Currency: "USD", AmountMinor: 99,
+	})
+	if res.Window != 90*time.Second {
+		t.Errorf("wildcard rule resolved to %s, want 90s", res.Window)
+	}
+}
+
+func testRulesTenantScoped(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+
+	id, err := s.CreateRule(ctx, tenantA, &rules.Rule{WindowSeconds: 60, Enabled: true})
+	if err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+
+	if got, _ := s.ListRules(ctx, tenantB); len(got) != 0 {
+		t.Errorf("tenant B listed %d of tenant A's rules", len(got))
+	}
+	if err := s.DeleteRule(ctx, tenantB, id); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("cross-tenant delete: %v, want ErrNotFound", err)
+	}
+	if got, _ := s.ListRules(ctx, tenantA); len(got) != 1 {
+		t.Error("tenant B's delete removed tenant A's rule")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/rules"
 )
 
 // Memory is an in-memory Store for unit tests and local runs. It is held to the
@@ -33,8 +34,12 @@ type Memory struct {
 	deliveries map[int64]*DeliveryRecord
 	payloads   map[int64][]byte
 
+	// reconciliation rules by tenant
+	rules map[string][]rules.Rule
+
 	nextID         int64
 	nextDeliveryID int64
+	nextRuleID     int64
 }
 
 // NewMemory returns an empty in-memory store.
@@ -49,6 +54,7 @@ func NewMemory() *Memory {
 		endpoints:  make(map[string]*WebhookEndpoint),
 		deliveries: make(map[int64]*DeliveryRecord),
 		payloads:   make(map[int64][]byte),
+		rules:      make(map[string][]rules.Rule),
 	}
 }
 

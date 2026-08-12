@@ -114,11 +114,13 @@ func run() error {
 	}
 	db := store.NewPostgres(pool)
 
-	// Rules are read per tenant on the request path. A DB-backed provider with
-	// a short cache replaces this; the interface is already the right shape.
-	ruleProvider := func(context.Context, string) (*rules.Set, error) {
-		return rules.NewSet(nil), nil
+	// Rules are read per tenant on the ingest path, so they are cached briefly
+	// rather than queried per debit.
+	ruleCache, err := rules.NewProvider(db.ListRules, rules.ProviderOptions{})
+	if err != nil {
+		return err
 	}
+	ruleProvider := ruleCache.Resolve
 
 	engine, err := correlate.New(db, correlate.Options{
 		Rules: ruleProvider,
