@@ -98,6 +98,9 @@ stateDiagram-v2
     pending_unknown --> suspect: window expired while still ambiguous
     suspect --> orphaned: investigation confirms failure
     suspect --> completed: investigation confirms success
+    pending_debit --> suspect: our own ingest had a gap
+    orphaned --> completed: the rail confirms it settled
+    orphaned --> suspect: the rail could not be reached
     orphaned --> reversal_pending: reversal webhook queued
     reversal_pending --> reversal_completed: customer confirms
     reversal_pending --> reversal_failed: retries exhausted
@@ -106,9 +109,17 @@ stateDiagram-v2
     reversal_completed --> [*]
 ```
 
-The `pending_debit -> suspect` edge is not in the original design. It is taken
-when **our own** ingest had a gap over that transaction's window — see
-"Knowing when we don't know" below.
+Three edges are not in the original design, and each exists to stop a reversal
+that should not happen:
+
+- `pending_debit -> suspect` — **our own** ingest had a gap over that window, so
+  the missing credit proves nothing (ADR-0004).
+- `orphaned -> completed` — the rail confirms the money arrived after all
+  (ADR-0005).
+- `orphaned -> suspect` — the rail could not be reached, and a guess here moves
+  real money (ADR-0005).
+
+All three are reachable only *before* a reversal is dispatched.
 
 Two states carry most of the product's judgement:
 
@@ -248,8 +259,42 @@ Flutterwave and most bank status endpoints all answer "what is the status of X"
 with a JSON field; the differences are configuration, not code. A rail that does
 not fit implements `StatusProvider` directly.
 
-> Built and tested, not yet consulted by the detection sweep. Wiring it in needs
-> two new state machine edges and is the next step.
+The sweep consults it **after** claiming an orphan and **before** queueing
+anything: after the claim so two replicas cannot both ask, before the queue so a
+wrong verdict never reaches the customer.
+
+| Rail says | What happens |
+| --- | --- |
+| `settled` | Transaction closes as completed. **No reversal** — the money arrived |
+| `failed` / `not_found` | The orphan is confirmed, with evidence. Reversal proceeds |
+| `unknown` | Goes to `suspect` for a human. **Never** a reversal |
+
+Once a reversal is dispatched the transaction is `reversal_pending`, and there is
+no edge back to `completed` — a late "actually it settled" cannot silently cancel
+something the customer's system may already have acted on (ADR-0005).
+
+**Corroboration is opt-in per deployment**, set by `RECONSYNC_PROVIDERS_FILE`.
+That is not timidity: with no adapter registered every answer is `unknown`, which
+would send every orphan to `suspect` and stop reversals altogether. With no
+config file the sweep behaves exactly as it did before this existed.
+
+```json
+[{
+  "name": "paystack",
+  "url_template": "https://api.paystack.co/transfer/verify/{reference}",
+  "auth_header": "Authorization",
+  "auth_value_env": "PAYSTACK_SECRET_KEY",
+  "status_path": "data.status",
+  "settled_values": ["success"],
+  "failed_values": ["failed", "reversed"]
+}]
+```
+
+The config names the environment variable holding the key rather than the key
+itself, so the file can be committed and reviewed without carrying a live
+credential. A named variable that is unset refuses to start, because an empty
+credential would make every query fail, and every failure is `unknown` — which
+would silently stop all reversals.
 
 ### `internal/pipeline` — bounded everything
 
@@ -542,6 +587,7 @@ and asserts every row is claimed exactly once.
 | `RECONSYNC_WEBHOOK_SECRET` | yes | — | Signs outbound webhooks |
 | `RECONSYNC_ADDR` | no | `:8080` | Listen address |
 | `RECONSYNC_DRAIN_TIMEOUT_SECONDS` | no | `20` | Graceful shutdown budget |
+| `RECONSYNC_PROVIDERS_FILE` | no | — | Rail status adapters. Unset disables corroboration entirely |
 | `RECONSYNC_ALLOW_PRIVATE_WEBHOOK_TARGETS` | no | `false` | **Local development only.** Disables the SSRF guard so webhooks can reach loopback. |
 
 The two secrets are required rather than defaulted: starting with a predictable
@@ -649,7 +695,7 @@ is delivered to the registered endpoint.
 | `make demo` — one command to a verified webhook | Done |
 | Ingest-gap awareness — never reverse on our own blind spot | Done |
 | Silence suppression — never mass-reverse during a tenant outage | Done |
-| Provider status interface + generic HTTP adapter | Done, not yet wired into detection |
+| Provider corroboration — ask the rail instead of inferring from silence | Done |
 | Docker Compose quickstart | **Not started** — needs a machine with Docker to verify |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |

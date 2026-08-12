@@ -70,6 +70,11 @@ var allowedTransitions = map[Status]map[Status]struct{}{
 	},
 	StatusOrphaned: {
 		StatusReversalPending: {},
+		// Both added by ADR-0005, reachable only before a reversal is dispatched.
+		// The rail confirmed it settled after all, or we could not get an answer
+		// and must not guess.
+		StatusCompleted: {},
+		StatusSuspect:   {},
 	},
 	StatusReversalPending: {
 		StatusReversalCompleted: {},

@@ -181,6 +181,31 @@ func (p *Postgres) ApplyCredit(ctx context.Context, tenantID, transactionID stri
 		tenantID, transactionID, string(target), creditAt, allowed)
 }
 
+// MarkSettled closes an orphan the rail confirmed arrived (ADR-0005).
+func (p *Postgres) MarkSettled(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
+	target := domain.StatusCompleted
+	return p.applyTransition(ctx, tenantID, transactionID, target, `
+		UPDATE transactions
+		SET status = $3,
+		    credit_at = COALESCE(credit_at, $4),
+		    updated_at = $4
+		WHERE tenant_id = $1 AND transaction_id = $2 AND status = ANY($5)
+		RETURNING `+txnColumns,
+		tenantID, transactionID, string(target), at, allowedSources(target))
+}
+
+// MarkUncertain moves a transaction to suspect for a human to investigate.
+func (p *Postgres) MarkUncertain(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
+	target := domain.StatusSuspect
+	return p.applyTransition(ctx, tenantID, transactionID, target, `
+		UPDATE transactions
+		SET status = $3,
+		    updated_at = $4
+		WHERE tenant_id = $1 AND transaction_id = $2 AND status = ANY($5)
+		RETURNING `+txnColumns,
+		tenantID, transactionID, string(target), at, allowedSources(target))
+}
+
 // MarkReversalPending records that the reversal webhook has been dispatched.
 // Legal from orphaned, and from reversal_failed on a dead-letter replay.
 func (p *Postgres) MarkReversalPending(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {

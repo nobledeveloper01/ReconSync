@@ -23,6 +23,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/health"
 	"github.com/nobledeveloper01/ReconSync/internal/ingest"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
+	"github.com/nobledeveloper01/ReconSync/internal/provider"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
 	"github.com/nobledeveloper01/ReconSync/internal/service"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
@@ -52,6 +53,10 @@ type config struct {
 	// allowPrivateWebhookTargets lets webhooks reach private addresses. Off by
 	// default; only ever for local development against a loopback receiver.
 	allowPrivateWebhookTargets bool
+
+	// providersFile configures rail status adapters. Empty disables
+	// corroboration entirely.
+	providersFile string
 }
 
 func loadConfig() (config, error) {
@@ -60,6 +65,7 @@ func loadConfig() (config, error) {
 		databaseURL:   os.Getenv("RECONSYNC_DATABASE_URL"),
 		tenantSalt:    os.Getenv("RECONSYNC_TENANT_SALT"),
 		webhookSecret: os.Getenv("RECONSYNC_WEBHOOK_SECRET"),
+		providersFile: os.Getenv("RECONSYNC_PROVIDERS_FILE"),
 		drainTimeout:  20 * time.Second,
 	}
 	if c.databaseURL == "" {
@@ -176,7 +182,20 @@ func run() error {
 		return err
 	}
 
-	detector, err := service.NewDetector(db, service.DetectorOptions{Logger: log})
+	// Opt-in. With no config file the sweep behaves exactly as before; with one,
+	// every orphan is checked against the rail before a reversal is queued.
+	providers, err := provider.LoadRegistry(cfg.providersFile)
+	if err != nil {
+		return err
+	}
+	if providers != nil {
+		log.Info("provider corroboration enabled", slog.Any("rails", providers.Names()))
+	}
+
+	detector, err := service.NewDetector(db, service.DetectorOptions{
+		Logger:    log,
+		Providers: providers,
+	})
 	if err != nil {
 		return err
 	}

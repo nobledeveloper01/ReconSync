@@ -46,6 +46,8 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"PeekDoesNotRemove", testPeekDoesNotRemove},
 		{"DeleteParkedCreditIsIdempotent", testDeleteParkedIdempotent},
 		{"ReversalLifecycle", testReversalLifecycle},
+		{"MarkSettledClosesAnOrphan", testMarkSettled},
+		{"MarkUncertainRaisesInvestigation", testMarkUncertain},
 		{"ReversalCompletedRequiresPending", testReversalCompletedRequiresPending},
 		{"APIKeyRoundTrip", testAPIKeyRoundTrip},
 		{"APIKeyRevocation", testAPIKeyRevocation},
@@ -506,6 +508,66 @@ func testReversalLifecycle(t *testing.T, s store.Store) {
 	// Terminal: a replayed confirmation must not move it again.
 	if _, err := s.MarkReversalCompleted(ctx, tenantA, "TX1", time.Now().UTC()); err == nil {
 		t.Error("a second reversal confirmation was accepted")
+	}
+}
+
+// ADR-0005: the rail confirmed arrival, so the orphan closes without a reversal.
+func testMarkSettled(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	mustUpsert(t, s, newExpiredTxn(tenantA, "TX1", 5*time.Minute, time.Minute))
+
+	if _, err := s.ClaimExpired(ctx, time.Now().UTC(), 10); err != nil {
+		t.Fatalf("ClaimExpired: %v", err)
+	}
+
+	settled, err := s.MarkSettled(ctx, tenantA, "TX1", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("MarkSettled: %v", err)
+	}
+	if settled.Status != domain.StatusCompleted {
+		t.Errorf("status = %s, want completed", settled.Status)
+	}
+	if settled.CreditAt == nil {
+		t.Error("credit_at not recorded")
+	}
+
+	// Completed is absorbing, so a second answer changes nothing.
+	if _, err := s.MarkSettled(ctx, tenantA, "TX1", time.Now().UTC()); err == nil {
+		t.Error("a settled transaction was settled again")
+	}
+}
+
+func testMarkUncertain(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	mustUpsert(t, s, newExpiredTxn(tenantA, "TX1", 5*time.Minute, time.Minute))
+
+	if _, err := s.ClaimExpired(ctx, time.Now().UTC(), 10); err != nil {
+		t.Fatalf("ClaimExpired: %v", err)
+	}
+
+	got, err := s.MarkUncertain(ctx, tenantA, "TX1", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("MarkUncertain: %v", err)
+	}
+	if got.Status != domain.StatusSuspect {
+		t.Errorf("status = %s, want suspect", got.Status)
+	}
+
+	// Once a reversal is dispatched neither answer may cancel it.
+	mustUpsert(t, s, newExpiredTxn(tenantA, "TX2", 5*time.Minute, time.Minute))
+	if _, err := s.ClaimExpired(ctx, time.Now().UTC(), 10); err != nil {
+		t.Fatalf("ClaimExpired: %v", err)
+	}
+	if _, err := s.MarkReversalPending(ctx, tenantA, "TX2", time.Now().UTC()); err != nil {
+		t.Fatalf("MarkReversalPending: %v", err)
+	}
+	if _, err := s.MarkUncertain(ctx, tenantA, "TX2", time.Now().UTC()); err == nil {
+		t.Error("a dispatched reversal was downgraded to suspect")
+	}
+	if _, err := s.MarkSettled(ctx, tenantA, "TX2", time.Now().UTC()); err == nil {
+		t.Error("a dispatched reversal was cancelled by a settled answer")
 	}
 }
 
@@ -1115,14 +1177,24 @@ func TestCreditRacingDetection(t *testing.T) {
 		creditWon := creditErr == nil
 		sweepWon := claimedRows == 1
 
-		if creditWon == sweepWon {
-			t.Fatalf("round %d: credit won=%v sweep won=%v — exactly one must win", i, creditWon, sweepWon)
+		// Both succeeding is legal since ADR-0005 added orphaned -> completed:
+		// the sweep claims it, then the credit settles it anyway. That is the
+		// point of the edge — a credit that turns up after detection but before
+		// dispatch should settle the transaction, not be refused.
+		//
+		// What must never happen is neither succeeding, which would mean the
+		// transaction sat expired and untouched.
+		if !creditWon && !sweepWon {
+			t.Fatalf("round %d: neither the credit nor the sweep touched the transaction", i)
 		}
+
+		// Whatever the interleaving, a credit that succeeded means the money
+		// arrived, and the final state must say so.
 		switch {
 		case creditWon && final.Status != domain.StatusCompleted:
-			t.Fatalf("round %d: credit won but status is %s", i, final.Status)
-		case sweepWon && final.Status != domain.StatusOrphaned:
-			t.Fatalf("round %d: sweep won but status is %s", i, final.Status)
+			t.Fatalf("round %d: the credit succeeded but status is %s", i, final.Status)
+		case !creditWon && final.Status != domain.StatusOrphaned:
+			t.Fatalf("round %d: the credit was refused so the sweep owns it, but status is %s", i, final.Status)
 		}
 		if creditWon {
 			creditWins++
@@ -1131,11 +1203,72 @@ func TestCreditRacingDetection(t *testing.T) {
 		}
 	}
 
-	// If one side always wins, the schedule is deterministic and this test is
-	// asserting nothing about the race it claims to cover.
+	// A lopsided split is expected now and is not a defect. Since ADR-0005 the
+	// credit is legal from both pending_debit and orphaned, so it succeeds
+	// whichever order the two operations land in. What this test still proves is
+	// that concurrent access never corrupts the row or leaves it untouched.
+	//
+	// The "exactly one wins" guard has not disappeared, it has moved: once a
+	// reversal is dispatched the transaction is reversal_pending and a credit
+	// must be refused. That boundary is covered by
+	// TestCreditCannotCancelADispatchedReversalUnderRace below.
 	t.Logf("credit won %d, sweep won %d of %d rounds", creditWins, sweepWins, rounds)
-	if creditWins == 0 || sweepWins == 0 {
-		t.Skipf("race never interleaved (credit %d / sweep %d); no signal this run", creditWins, sweepWins)
+}
+
+// The boundary that must still hold absolutely: once a reversal has been
+// dispatched, a credit arriving concurrently must never cancel it. The
+// customer's system may already have moved the money back.
+func TestCreditCannotCancelADispatchedReversalUnderRace(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	const rounds = 40
+	for i := 0; i < rounds; i++ {
+		truncate(t, pool)
+		s := store.NewPostgres(pool)
+		seedTenants(t, s, tenantA)
+
+		if _, err := s.UpsertDebits(ctx, tenantA, []*domain.Transaction{
+			newExpiredTxn(tenantA, "RACE", 5*time.Minute, time.Minute),
+		}); err != nil {
+			t.Fatalf("UpsertDebits: %v", err)
+		}
+		if _, err := s.ClaimExpired(ctx, time.Now().UTC(), 10); err != nil {
+			t.Fatalf("ClaimExpired: %v", err)
+		}
+
+		var (
+			wg          sync.WaitGroup
+			creditErr   error
+			dispatchErr error
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, creditErr = s.ApplyCredit(ctx, tenantA, "RACE", domain.StatusCompleted, time.Now().UTC())
+		}()
+		go func() {
+			defer wg.Done()
+			_, dispatchErr = s.MarkReversalPending(ctx, tenantA, "RACE", time.Now().UTC())
+		}()
+		wg.Wait()
+
+		final, err := s.Get(ctx, tenantA, "RACE")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+
+		// Exactly one must win here, because completed and reversal_pending have
+		// no edge between them in either direction.
+		if (creditErr == nil) == (dispatchErr == nil) {
+			t.Fatalf("round %d: credit err=%v dispatch err=%v — exactly one must win", i, creditErr, dispatchErr)
+		}
+		switch {
+		case creditErr == nil && final.Status != domain.StatusCompleted:
+			t.Fatalf("round %d: credit won but status is %s", i, final.Status)
+		case dispatchErr == nil && final.Status != domain.StatusReversalPending:
+			t.Fatalf("round %d: dispatch won but status is %s", i, final.Status)
+		}
 	}
 }
 

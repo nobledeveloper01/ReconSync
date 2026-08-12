@@ -134,6 +134,14 @@ func (m *Memory) ApplyCredit(_ context.Context, tenantID, transactionID string, 
 	return &out, nil
 }
 
+func (m *Memory) MarkSettled(_ context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
+	return m.markReversal(tenantID, transactionID, domain.StatusCompleted, at)
+}
+
+func (m *Memory) MarkUncertain(_ context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
+	return m.markReversal(tenantID, transactionID, domain.StatusSuspect, at)
+}
+
 func (m *Memory) MarkReversalPending(_ context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error) {
 	return m.markReversal(tenantID, transactionID, domain.StatusReversalPending, at)
 }
@@ -165,6 +173,12 @@ func (m *Memory) markReversal(tenantID, transactionID string, target domain.Stat
 		stored.ReversalTriggeredAt = &stamp
 	case domain.StatusReversalCompleted:
 		stored.ReversalCompletedAt = &stamp
+	case domain.StatusCompleted:
+		// The rail confirmed arrival; record when, without overwriting a real
+		// credit timestamp if one already landed.
+		if stored.CreditAt == nil {
+			stored.CreditAt = &stamp
+		}
 	}
 	stored.UpdatedAt = time.Now().UTC()
 

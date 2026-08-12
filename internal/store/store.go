@@ -43,6 +43,14 @@ type TransactionStore interface {
 	// Returns ErrNotFound, or domain.InvalidTransitionError if the edge is illegal.
 	ApplyCredit(ctx context.Context, tenantID, transactionID string, target domain.Status, creditAt time.Time) (*domain.Transaction, error)
 
+	// MarkSettled closes an orphan the rail has since confirmed arrived, so no
+	// reversal is sent (ADR-0005).
+	MarkSettled(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error)
+
+	// MarkUncertain moves an orphan to suspect because we could not establish
+	// what happened. It raises an investigation and never a reversal.
+	MarkUncertain(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error)
+
 	// MarkReversalPending records that the reversal webhook has been dispatched.
 	MarkReversalPending(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error)
 

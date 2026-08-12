@@ -26,10 +26,12 @@ var allStatuses = []domain.Status{
 var specEdges = map[domain.Status][]domain.Status{
 	// StatusSuspect from pending_debit is ADR-0004: an ingest gap means the
 	// absence of a credit proves nothing, so it must not auto-reverse.
-	domain.StatusPendingDebit:      {domain.StatusCompleted, domain.StatusPendingUnknown, domain.StatusOrphaned, domain.StatusSuspect},
-	domain.StatusPendingUnknown:    {domain.StatusCompleted, domain.StatusSuspect},
-	domain.StatusSuspect:           {domain.StatusOrphaned, domain.StatusCompleted},
-	domain.StatusOrphaned:          {domain.StatusReversalPending},
+	domain.StatusPendingDebit:   {domain.StatusCompleted, domain.StatusPendingUnknown, domain.StatusOrphaned, domain.StatusSuspect},
+	domain.StatusPendingUnknown: {domain.StatusCompleted, domain.StatusSuspect},
+	domain.StatusSuspect:        {domain.StatusOrphaned, domain.StatusCompleted},
+	// Completed and Suspect from orphaned are ADR-0005: provider corroboration
+	// settles it, or fails to answer and must not guess.
+	domain.StatusOrphaned:          {domain.StatusReversalPending, domain.StatusCompleted, domain.StatusSuspect},
 	domain.StatusReversalPending:   {domain.StatusReversalCompleted, domain.StatusReversalFailed},
 	domain.StatusReversalFailed:    {domain.StatusReversalPending},
 	domain.StatusCompleted:         {},

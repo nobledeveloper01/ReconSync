@@ -88,6 +88,13 @@ func NewHTTP(cfg HTTPConfig) (*HTTPProvider, error) {
 	return p, nil
 }
 
+func msToDuration(ms int) time.Duration {
+	if ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 func lowerSet(values []string) map[string]struct{} {
 	out := make(map[string]struct{}, len(values))
 	for _, v := range values {
