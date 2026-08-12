@@ -71,6 +71,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"ReversalClaims", testReversalClaims},
 		{"ReleaseAndReclaim", testReleaseAndReclaim},
 		{"AuditChainAppend", testAuditChainAppend},
+		{"AuditSurvivesClockPrecision", testAuditSurvivesClockPrecision},
 		{"AuditRoundTripsContent", testAuditRoundTripsContent},
 		{"AuditChainsAreTenantScoped", testAuditChainsAreTenantScoped},
 		{"CheckpointRoundTrip", testCheckpointRoundTrip},

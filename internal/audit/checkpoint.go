@@ -136,12 +136,18 @@ func VerifyCheckpoint(c Checkpoint, publicKey string) error {
 	return nil
 }
 
+// checkpointMessage builds the bytes that get signed.
+//
+// TakenAt is truncated to storage precision for the same reason record hashes
+// are: a signature over nanoseconds the database rounds away stops verifying
+// the moment the checkpoint is read back, which would make every checkpoint
+// written on Linux look like evidence of tampering.
 func checkpointMessage(c Checkpoint) ([]byte, error) {
 	encoded, err := json.Marshal(signedContent{
 		TenantID: c.TenantID,
 		Seq:      c.Seq,
 		Hash:     c.Hash,
-		TakenAt:  c.TakenAt.UTC().Format(time.RFC3339Nano),
+		TakenAt:  c.TakenAt.UTC().Truncate(StoragePrecision).Format(time.RFC3339Nano),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("audit: encode checkpoint: %w", err)

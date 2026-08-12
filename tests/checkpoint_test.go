@@ -340,7 +340,12 @@ func testCheckpointRoundTrip(t *testing.T, s store.Store) {
 			TenantID: tenantID,
 			Seq:      seq,
 			Hash:     "sha256:deadbeef",
-			TakenAt:  time.Now().UTC().Truncate(time.Microsecond),
+			// Nanosecond precision, as a real clock gives on Linux. Truncating
+			// here would hide the bug this must catch: a signature over
+			// nanoseconds the database rounds away stops verifying on the way
+			// back out.
+			TakenAt: time.Date(2026, 8, 12, 21, 56, 10, 47002936, time.UTC).Add(
+				time.Duration(seq) * time.Second),
 		})
 		if err != nil {
 			t.Fatalf("Sign: %v", err)

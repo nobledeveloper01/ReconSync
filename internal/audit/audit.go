@@ -68,17 +68,28 @@ type hashedContent struct {
 	PrevHash   string         `json:"prev_hash"`
 }
 
+// StoragePrecision is the finest timestamp the store can hold: Postgres
+// timestamptz keeps microseconds.
+//
+// The hash is computed at this precision, not at the caller's. Hashing the
+// nanoseconds a Go clock happens to provide would produce a hash that stops
+// matching the moment the record is read back, because storage rounded them
+// away — every record written on a platform with nanosecond resolution would
+// fail its own verification. That is not a theoretical concern: it is what
+// Linux does, while a macOS clock usually gives microseconds and hides it.
+const StoragePrecision = time.Microsecond
+
 // ComputeHash derives a record's hash from its content and the one before it.
 //
-// Deterministic by construction: timestamps are normalised to UTC RFC3339Nano
-// and Go's JSON encoder sorts map keys, so the same record always hashes the
-// same way on any machine.
+// Deterministic by construction: timestamps are normalised to UTC at storage
+// precision and Go's JSON encoder sorts map keys, so the same record always
+// hashes the same way on any machine, before or after a round trip.
 func ComputeHash(r Record, prevHash string) (string, error) {
 	content := hashedContent{
 		Seq:        r.Seq,
 		TenantID:   r.TenantID,
 		EventType:  r.EventType,
-		OccurredAt: r.OccurredAt.UTC().Format(time.RFC3339Nano),
+		OccurredAt: r.OccurredAt.UTC().Truncate(StoragePrecision).Format(time.RFC3339Nano),
 		Actor:      orEmpty(r.Actor),
 		Subject:    orEmpty(r.Subject),
 		Payload:    orEmpty(r.Payload),

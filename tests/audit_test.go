@@ -185,6 +185,34 @@ func TestVerifyChainDetectsTampering(t *testing.T) {
 
 // --- store conformance ---
 
+// A real clock does not hand out round timestamps. Every test here used a
+// zero-nanosecond time, which hid a bug that broke every audit record the
+// running service wrote on Linux: the hash covered nanoseconds that Postgres
+// truncates on the way in, so a record failed its own verification the moment
+// it was read back.
+func testAuditSurvivesClockPrecision(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	tenant := uniqueTenant(t, s)
+
+	for i := 0; i < 3; i++ {
+		rec := auditRecord(audit.EventDetected, "TX-1")
+		// Nanosecond precision, exactly as time.Now() gives on Linux.
+		rec.OccurredAt = time.Date(2026, 8, 12, 21, 48, 36, 720050936, time.UTC)
+		if _, err := s.AppendAudit(ctx, tenant, rec); err != nil {
+			t.Fatalf("AppendAudit: %v", err)
+		}
+	}
+
+	records, err := s.ListAudit(ctx, tenant, 100)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	if v := audit.VerifyChain(tenant, records); !v.Verified {
+		t.Fatalf("a chain written with a real clock does not verify: broken at seq %d, %s",
+			v.BrokenAt, v.Reason)
+	}
+}
+
 func testAuditChainAppend(t *testing.T, s store.Store) {
 	ctx := context.Background()
 	tenant := uniqueTenant(t, s)
