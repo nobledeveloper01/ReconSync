@@ -228,6 +228,29 @@ destroyed, so any overlap makes the window unreliable. Some genuinely orphaned
 transactions will wait for a human. That is the right direction to be wrong in —
 a delayed reversal is a complaint, a wrong reversal is a double payment.
 
+### `internal/provider` — asking instead of guessing
+
+Silence is the weakest evidence in the system. This package turns "we heard
+nothing" into "we asked, and here is what we found" — a status query against the
+rail that actually moved the money.
+
+Four outcomes: `settled`, `failed`, `not_found`, `unknown`. The whole design
+turns on the last one. **Every** failure path — unreachable, timed out, HTTP 500,
+malformed JSON, an unrecognised status string, no adapter registered, an adapter
+that panicked into an error — produces `unknown`, never a verdict. A provider
+fault is not a failed transfer, and treating it as one would move real money.
+
+`not_found` is the exception worth noting: a provider with no record of a
+transfer we believe we initiated is itself evidence that it never happened.
+
+The HTTP adapter is deliberately generic rather than one type per rail. Paystack,
+Flutterwave and most bank status endpoints all answer "what is the status of X"
+with a JSON field; the differences are configuration, not code. A rail that does
+not fit implements `StatusProvider` directly.
+
+> Built and tested, not yet consulted by the detection sweep. Wiring it in needs
+> two new state machine edges and is the next step.
+
 ### `internal/pipeline` — bounded everything
 
 The §4.3 worker pool. Its whole job is to absorb load without ever blocking the
@@ -595,6 +618,7 @@ internal/pipeline/   bounded worker pool, batching, backpressure
 internal/auth/       API key issue and verification
 internal/ingest/     HTTP API, health, readiness, metrics
 internal/health/     records whether our own view of each tenant was intact
+internal/provider/   asks the rail what actually happened, instead of guessing
 internal/webhook/    payload signing, retry policy, SSRF-guarded client
 internal/service/    detection sweep and webhook dispatch loops
 migrations/          schema, applied forward and backward in tests
@@ -625,6 +649,7 @@ is delivered to the registered endpoint.
 | `make demo` — one command to a verified webhook | Done |
 | Ingest-gap awareness — never reverse on our own blind spot | Done |
 | Silence suppression — never mass-reverse during a tenant outage | Done |
+| Provider status interface + generic HTTP adapter | Done, not yet wired into detection |
 | Docker Compose quickstart | **Not started** — needs a machine with Docker to verify |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |
