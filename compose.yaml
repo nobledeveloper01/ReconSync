@@ -67,9 +67,13 @@ services:
       # refuses by design. Never set this outside local development.
       RECONSYNC_ALLOW_PRIVATE_WEBHOOK_TARGETS: "true"
 
+      # A deliberately patterned key: it is a valid 32-byte seed and obviously
+      # not a secret, which is the point. Real ones come from `reconsyncctl
+      # checkpoints keygen` and never live in a file like this — a signing key
+      # anyone can read signs nothing worth reading.
+      RECONSYNC_CHECKPOINT_KEY: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
       # Two seconds so a checkpoint appears while you are still watching. The
       # default is an hour; the interval is the window a rewrite could hide in.
-      RECONSYNC_CHECKPOINT_KEY: 9d1f0e5c7a3b2846d5e9f0c1a2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5
       RECONSYNC_CHECKPOINT_INTERVAL_SECONDS: "2"
     ports:
       - "127.0.0.1:8080:8080"
