@@ -50,6 +50,9 @@ type Memory struct {
 	// per-tenant audit chain, in sequence order
 	audit map[string][]audit.Record
 
+	// signed chain heads, per tenant
+	checkpoints map[string][]audit.Checkpoint
+
 	nextID         int64
 	nextDeliveryID int64
 	nextRuleID     int64
@@ -64,14 +67,15 @@ func NewMemory() *Memory {
 		parked:   make(map[string]map[string]*domain.CreditEvent),
 		apiKeys:  make(map[string]*auth.Record),
 
-		endpoints:  make(map[string]*WebhookEndpoint),
-		deliveries: make(map[int64]*DeliveryRecord),
-		payloads:   make(map[int64][]byte),
-		rules:      make(map[string][]rules.Rule),
-		health:     make(map[healthKey]IngestSample),
-		silence:    make(map[string]time.Time),
-		claims:     make(map[claimKey]*ReversalClaim),
-		audit:      make(map[string][]audit.Record),
+		endpoints:   make(map[string]*WebhookEndpoint),
+		deliveries:  make(map[int64]*DeliveryRecord),
+		payloads:    make(map[int64][]byte),
+		rules:       make(map[string][]rules.Rule),
+		health:      make(map[healthKey]IngestSample),
+		silence:     make(map[string]time.Time),
+		claims:      make(map[claimKey]*ReversalClaim),
+		audit:       make(map[string][]audit.Record),
+		checkpoints: make(map[string][]audit.Checkpoint),
 	}
 }
 

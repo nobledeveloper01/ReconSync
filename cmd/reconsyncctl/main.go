@@ -36,6 +36,9 @@ Usage:
   reconsyncctl rules create --tenant ID --window SECONDS [--type T] [--provider P]
   reconsyncctl rules list --tenant ID
   reconsyncctl rules delete --tenant ID --id RULE_ID
+  reconsyncctl checkpoints keygen              mint an audit signing key
+  reconsyncctl checkpoints list --tenant ID    signed chain heads, as JSON to archive
+  reconsyncctl checkpoints verify --tenant ID [--public-key KEY]
 
 Reads RECONSYNC_DATABASE_URL from the environment.
 "endpoints test" also needs RECONSYNC_WEBHOOK_SECRET to sign the payload.
@@ -82,6 +85,13 @@ func run(args []string) error {
 			"create": rulesCreate,
 			"list":   rulesList,
 			"delete": rulesDelete,
+		})
+
+	case "checkpoints":
+		return dispatch(ctx, "checkpoints", args[1:], map[string]subcommand{
+			"keygen": checkpointsKeygen,
+			"list":   checkpointsList,
+			"verify": checkpointsVerify,
 		})
 	}
 

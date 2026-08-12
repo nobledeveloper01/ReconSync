@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/nobledeveloper01/ReconSync/internal/audit"
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/correlate"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
@@ -58,6 +59,15 @@ type config struct {
 	// providersFile configures rail status adapters. Empty disables
 	// corroboration entirely.
 	providersFile string
+
+	// checkpointKey signs audit chain heads. Empty disables checkpointing, and
+	// the verify endpoint then says so rather than implying a guarantee that
+	// is not there.
+	checkpointKey string
+
+	// checkpointInterval is the size of the window an attacker can rewrite
+	// undetected, so it is configurable rather than fixed.
+	checkpointInterval time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -67,6 +77,7 @@ func loadConfig() (config, error) {
 		tenantSalt:    os.Getenv("RECONSYNC_TENANT_SALT"),
 		webhookSecret: os.Getenv("RECONSYNC_WEBHOOK_SECRET"),
 		providersFile: os.Getenv("RECONSYNC_PROVIDERS_FILE"),
+		checkpointKey: os.Getenv("RECONSYNC_CHECKPOINT_KEY"),
 		drainTimeout:  20 * time.Second,
 	}
 	if c.databaseURL == "" {
@@ -79,6 +90,13 @@ func loadConfig() (config, error) {
 	}
 	if c.webhookSecret == "" {
 		return c, errors.New("RECONSYNC_WEBHOOK_SECRET is required")
+	}
+	if raw := os.Getenv("RECONSYNC_CHECKPOINT_INTERVAL_SECONDS"); raw != "" {
+		secs, err := strconv.Atoi(raw)
+		if err != nil || secs <= 0 {
+			return c, fmt.Errorf("RECONSYNC_CHECKPOINT_INTERVAL_SECONDS must be a positive integer, got %q", raw)
+		}
+		c.checkpointInterval = time.Duration(secs) * time.Second
 	}
 	c.allowPrivateWebhookTargets = os.Getenv("RECONSYNC_ALLOW_PRIVATE_WEBHOOK_TARGETS") == "true"
 	if raw := os.Getenv("RECONSYNC_DRAIN_TIMEOUT_SECONDS"); raw != "" {
@@ -233,6 +251,27 @@ func run() error {
 		return err
 	}
 
+	// Opt-in. Without a key the chain is still verifiable against itself; with
+	// one, a wholesale rewrite becomes detectable too.
+	var checkpointer *service.Checkpointer
+	if cfg.checkpointKey != "" {
+		signer, err := audit.NewSigner(cfg.checkpointKey)
+		if err != nil {
+			return err
+		}
+		checkpointer, err = service.NewCheckpointer(db, service.CheckpointerOptions{
+			Logger: log, Signer: signer, Interval: cfg.checkpointInterval,
+		})
+		if err != nil {
+			return err
+		}
+		log.Info("audit checkpoints enabled; publish this key so anyone can verify them",
+			slog.String("public_key", signer.PublicKey()))
+	} else {
+		log.Warn("RECONSYNC_CHECKPOINT_KEY is not set: the audit chain is verifiable against itself, " +
+			"but a rewrite of the whole chain would not be detectable")
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.addr,
 		Handler:           api,
@@ -247,6 +286,10 @@ func run() error {
 	go func() { defer wg.Done(); detector.Run(ctx) }()
 	go func() { defer wg.Done(); dispatcher.Run(ctx) }()
 	go func() { defer wg.Done(); healthRecorder.Run(ctx) }()
+	if checkpointer != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); checkpointer.Run(ctx) }()
+	}
 
 	serveErr := make(chan error, 1)
 	go func() {

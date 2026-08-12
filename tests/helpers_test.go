@@ -32,6 +32,7 @@ const (
 // Torn down in reverse order, then rebuilt, so each run starts from a known
 // schema regardless of what the previous one left behind.
 var migrationFiles = []string{
+	"0008_audit_checkpoints.down.sql",
 	"0007_reversal_claims.down.sql",
 	"0006_silence_episodes.down.sql",
 	"0005_audit_chain.down.sql",
@@ -46,6 +47,7 @@ var migrationFiles = []string{
 	"0005_audit_chain.up.sql",
 	"0006_silence_episodes.up.sql",
 	"0007_reversal_claims.up.sql",
+	"0008_audit_checkpoints.up.sql",
 }
 
 // testPool connects to the database named by RECONSYNC_TEST_DATABASE_URL and

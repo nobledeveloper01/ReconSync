@@ -73,6 +73,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"AuditChainAppend", testAuditChainAppend},
 		{"AuditRoundTripsContent", testAuditRoundTripsContent},
 		{"AuditChainsAreTenantScoped", testAuditChainsAreTenantScoped},
+		{"CheckpointRoundTrip", testCheckpointRoundTrip},
 		{"CountByStatus", testCountByStatus},
 		{"ListReversalCandidates", testListReversalCandidates},
 		{"ProviderStats", testProviderStats},

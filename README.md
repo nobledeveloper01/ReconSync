@@ -376,6 +376,61 @@ A broken chain returns **200 with `verified: false`**, not a 5xx. Verification
 succeeded; what it found was tampering. A 500 would send the operator looking for
 our bug instead of their intruder.
 
+#### The attack the chain cannot catch
+
+A chain proves nobody edited a record in place. It does not prove nobody rewrote
+the whole thing. Someone with write access deletes every row, inserts their
+preferred history, and recomputes every hash from the start — the result is
+perfectly self-consistent and `verified: true`. Nothing inside the database can
+detect that, because everything inside the database is what the attacker
+controls.
+
+So the chain head is signed on a schedule with an **Ed25519 key that is not in
+the database**, and the signature is what a rewrite cannot reproduce:
+
+```
+chain:      3 records, verified=true
+checkpoint: seq 3, taken 2026-08-12T21:30:39Z, matches=false
+            the chain reaches a different hash at seq 3 than the one signed;
+            history was rewritten
+```
+
+That is a real run. A forger rewrote all three records using ReconSync's own
+hashing code, the chain check passed it, and the checkpoint caught it.
+
+Ed25519 rather than an HMAC, deliberately. An HMAC would let *us* verify our own
+checkpoints, but a customer or regulator could only check one by asking us for
+the secret — at which point they could forge checkpoints too, and the signature
+proves nothing to the party that most needs it. With a public key they verify
+independently, and we cannot quietly re-sign a rewritten history.
+
+```bash
+reconsyncctl checkpoints keygen                 # mint the key, publish the public half
+reconsyncctl checkpoints list --tenant tnt_acme # export and archive them
+reconsyncctl checkpoints verify --tenant tnt_acme --public-key <published key>
+```
+
+Four things about it are deliberate:
+
+- **Checkpoints are opt-in.** Without `RECONSYNC_CHECKPOINT_KEY` the chain is
+  still verifiable against itself, and `/v1/audit/verify` says plainly that a
+  wholesale rewrite would not be detectable. Reporting a guarantee that is not
+  configured would be worse than not having it.
+- **The interval is the exposure.** Anything appended since the last checkpoint
+  has no signature behind it, so `RECONSYNC_CHECKPOINT_INTERVAL_SECONDS` is a
+  knob, defaulting to an hour.
+- **A broken chain is never signed.** The checkpointer recomputes before it
+  signs; signing a stored hash without checking it would mean cheerfully signing
+  a forgery, which is precisely what this exists to prevent.
+- **Verifying against the key stored beside the checkpoint proves almost
+  nothing** — an attacker who rewrote the chain would sign it with their own key
+  and store that too. The CLI warns when you do it, and asks for the key you
+  published.
+
+The signature is only worth what its publication is worth. A checkpoint archived
+solely in the database an attacker controls is a row they can delete; the
+endpoint that lists them says so.
+
 Appends are serialised per tenant with an advisory lock rather than raced
 optimistically (ADR-0007). A chain cannot be built in parallel, and optimistic
 retry turns a guaranteed short wait into a probabilistic dropped record — which
@@ -790,7 +845,8 @@ Because payloads come in more than one shape, a receiver should switch on
 | POST | `/v1/events/reversal-completed` | Confirm a reversal; returns detection-to-confirmation elapsed time. |
 | GET | `/v1/transactions/{id}` | One transaction. |
 | GET | `/v1/transactions?status=&limit=` | List by state. |
-| GET | `/v1/audit/verify` | Recompute the tenant's audit chain and report any tampering. |
+| GET | `/v1/audit/verify` | Recompute the tenant's audit chain and check it against its signature. |
+| GET | `/v1/audit/checkpoints` | The signed chain heads, to archive outside ReconSync. |
 | GET | `/v1/reports/reversal-compliance` | Prove every reversal met its deadline. `format=json\|csv`. |
 | GET | `/v1/reports/providers` | Rank your rails by failure rate and settlement latency. |
 | GET | `/v1/reports/exposure` | How much customer money is outstanding. `scope=all\|backfill\|live`. |
@@ -874,6 +930,8 @@ and asserts every row is claimed exactly once.
 | `RECONSYNC_ADDR` | no | `:8080` | Listen address |
 | `RECONSYNC_DRAIN_TIMEOUT_SECONDS` | no | `20` | Graceful shutdown budget |
 | `RECONSYNC_PROVIDERS_FILE` | no | — | Rail status adapters. Unset disables corroboration entirely |
+| `RECONSYNC_CHECKPOINT_KEY` | no | — | Ed25519 key signing audit chain heads. Unset means a wholesale rewrite is undetectable, and `/v1/audit/verify` says so |
+| `RECONSYNC_CHECKPOINT_INTERVAL_SECONDS` | no | `3600` | How often heads are signed. The interval is the window an attacker can rewrite undetected |
 | `RECONSYNC_ALLOW_PRIVATE_WEBHOOK_TARGETS` | no | `false` | **Local development only.** Disables the SSRF guard so webhooks can reach loopback. |
 
 The two secrets are required rather than defaulted: starting with a predictable
@@ -897,9 +955,6 @@ The audit table is append-only, enforced at the database rather than promised by
 the application: triggers reject `UPDATE`, `DELETE` **and `TRUNCATE`**. The
 truncate guard is statement-level, because row triggers do not fire on `TRUNCATE`
 and it would otherwise walk straight through the other two.
-
-> The audit hash chain and signed checkpoints are not yet implemented — only the
-> immutability enforcement is.
 
 ---
 
@@ -949,7 +1004,7 @@ internal/correlate/  matches credit legs to debits
 internal/pipeline/   bounded worker pool, batching, backpressure
 internal/auth/       API key issue and verification
 internal/ingest/     HTTP API, health, readiness, metrics
-internal/audit/      the verifiable hash chain
+internal/audit/      the verifiable hash chain and its signed checkpoints
 internal/evidence/   what a verdict rests on, and how sure we are
 internal/health/     records whether our own view of each tenant was intact
 internal/provider/   asks the rail what actually happened, instead of guessing
@@ -994,7 +1049,7 @@ is delivered to the registered endpoint.
 | Confidence score + evidence trail on every verdict | Done |
 | Audit hash chain + `GET /v1/audit/verify` | Done |
 | Reversal SLA compliance report (JSON + CSV) | Done |
-| Signed chain checkpoints published externally | **Not started** |
+| Signed chain checkpoints (Ed25519, `GET /v1/audit/checkpoints`) | Done |
 | Docker Compose quickstart | **Not started** — needs a machine with Docker to verify |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |

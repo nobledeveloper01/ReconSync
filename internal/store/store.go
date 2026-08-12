@@ -309,6 +309,24 @@ type AuditStore interface {
 
 	// ListAudit returns the chain in sequence order.
 	ListAudit(ctx context.Context, tenantID string, limit int) ([]audit.Record, error)
+
+	// SaveCheckpoint stores a signed chain head. Re-signing the same head is a
+	// no-op rather than another identical row.
+	SaveCheckpoint(ctx context.Context, c audit.Checkpoint) error
+
+	// LatestCheckpoint returns the newest checkpoint for a tenant, or
+	// ErrNotFound when none has been taken.
+	LatestCheckpoint(ctx context.Context, tenantID string) (*audit.Checkpoint, error)
+
+	// ListCheckpoints returns a tenant's checkpoints, newest first. This is the
+	// list a customer publishes or archives; without it the signatures only
+	// exist where an attacker can reach them.
+	ListCheckpoints(ctx context.Context, tenantID string, limit int) ([]audit.Checkpoint, error)
+
+	// TenantsWithAudit lists tenants that have a chain, so the checkpointer can
+	// sweep all of them. Not tenant-scoped, like ClaimExpired, and never on a
+	// request path.
+	TenantsWithAudit(ctx context.Context) ([]string, error)
 }
 
 // ReversalClaim is one customer worker's authorisation to reverse.

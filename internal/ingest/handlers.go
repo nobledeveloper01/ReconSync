@@ -361,6 +361,59 @@ func (s *Server) handleListTransactions(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, r, http.StatusOK, map[string]any{"transactions": views})
 }
 
+// verifyResponse is the chain check plus the signature check. Both are needed:
+// the first catches an edited record, the second catches a wholesale rewrite
+// that the first would happily pass.
+type verifyResponse struct {
+	audit.Verification
+	Checkpoint audit.CheckpointCheck `json:"checkpoint"`
+}
+
+// handleAuditCheckpoints returns the signed chain heads.
+//
+// Worth exporting and archiving somewhere ReconSync cannot reach: a signature
+// that only exists in the database an attacker controls proves nothing they
+// cannot simply delete.
+func (s *Server) handleAuditCheckpoints(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if s.audit == nil {
+		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
+			"audit verification is not configured on this deployment", "")
+		return
+	}
+
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 || n > 1000 {
+			s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+				"limit must be between 1 and 1000", "limit")
+			return
+		}
+		limit = n
+	}
+
+	checkpoints, err := s.audit.ListCheckpoints(r.Context(), principal.TenantID, limit)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+	if checkpoints == nil {
+		checkpoints = []audit.Checkpoint{}
+	}
+
+	s.writeJSON(w, r, http.StatusOK, map[string]any{
+		"tenant_id":   principal.TenantID,
+		"checkpoints": checkpoints,
+		"verify_with": "ed25519, over the JSON of {tenant_id, seq, hash, taken_at} in that order, base64 signature",
+		"notice":      "archive these outside ReconSync. A signature stored only here proves nothing an attacker with this database cannot delete.",
+	})
+}
+
 // handleAuditVerify walks the tenant's chain and reports whether it is intact.
 //
 // The customer runs this themselves, and it recomputes every hash from the
@@ -396,7 +449,31 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := audit.VerifyChain(principal.TenantID, records)
+	result := verifyResponse{Verification: audit.VerifyChain(principal.TenantID, records)}
+
+	// The chain check alone cannot catch a full rewrite: an attacker with write
+	// access recomputes every hash and it passes. The checkpoint is the part
+	// they cannot forge, so it is checked here and its absence is reported
+	// rather than glossed over.
+	switch latest, err := s.audit.LatestCheckpoint(r.Context(), principal.TenantID); {
+	case errors.Is(err, store.ErrNotFound):
+		result.Checkpoint = audit.CheckpointCheck{
+			Reason: "no checkpoint has been signed for this tenant, so a rewrite of the whole chain would not be detectable",
+		}
+	case err != nil:
+		s.writeDomainError(w, r, err)
+		return
+	default:
+		result.Checkpoint = audit.VerifyAgainstCheckpoint(records, *latest, latest.PublicKey)
+		// A chain that verifies against itself but not against its signature
+		// has been rewritten, and the headline must say so.
+		if !result.Checkpoint.Matches {
+			result.Verified = false
+			if result.Reason == "" {
+				result.Reason = result.Checkpoint.Reason
+			}
+		}
+	}
 
 	// A broken chain is a successful verification that found tampering, not a
 	// failed request — 200 with verified:false. A 5xx would suggest our bug and
