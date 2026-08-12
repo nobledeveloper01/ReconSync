@@ -276,6 +276,21 @@ reap.
 
 ## 4. Quick start
 
+### See it work first
+
+```bash
+make demo
+```
+
+One command. It creates a throwaway database, starts ReconSync and a reference
+webhook receiver, reports two debits — one that settles and one that does not —
+and prints the signed reversal webhook that arrives for the orphan, with its
+signature verified. Everything is torn down afterwards, including the database.
+
+Needs Go and a running Postgres. Nothing else, and it touches no real data.
+
+### Set it up properly
+
 Requires Go 1.23+ and Postgres 16.
 
 ```bash
@@ -484,6 +499,7 @@ and it would otherwise walk straight through the other two.
 ## 9. Development
 
 ```bash
+make demo              # end to end in one command, see above
 make test              # unit tests, race detector, no database needed
 make test-integration  # full suite against a local Postgres
 make test-isolation    # the tenant isolation gate on its own
@@ -515,7 +531,10 @@ resort — reversing a schema also deletes the data in it.
 
 ```text
 cmd/reconsync/       server: ingest API, detection sweep, webhook dispatcher
-cmd/reconsyncctl/    admin CLI: doctor, tenant create, keys create
+cmd/reconsyncctl/    admin CLI: doctor, tenants, keys, endpoints, rules
+cmd/reconsync-echo/  reference webhook receiver — the worked example of how to
+                     verify a signature before trusting a payload
+scripts/demo.sh      what `make demo` runs
 internal/domain/     transaction types + state machine (no infrastructure deps)
 internal/rules/      reconciliation window resolution
 internal/store/      persistence port, in-memory and Postgres implementations
@@ -550,6 +569,8 @@ is delivered to the registered endpoint.
 | Ingest HTTP API, health, readiness, metrics | Done |
 | Webhook signing, retries, DLQ, SSRF guard | Done |
 | Server binary and admin CLI | Done |
+| `make demo` — one command to a verified webhook | Done |
+| Docker Compose quickstart | **Not started** — needs a machine with Docker to verify |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |
 | Audit hash chain and signed checkpoints | **Not started** |

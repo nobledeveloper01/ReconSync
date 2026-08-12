@@ -13,6 +13,9 @@ help:
 build: ## Compile everything
 	go build ./...
 
+demo: ## End to end in one command: debit in, verified reversal webhook out
+	@bash scripts/demo.sh
+
 test: ## Unit tests with the race detector (no database needed)
 	go test -race ./tests/...
 
