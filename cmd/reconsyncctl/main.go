@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,31 +36,59 @@ Reads RECONSYNC_DATABASE_URL from the environment.
 
 func run(args []string) error {
 	if len(args) == 0 {
-		fmt.Print(usage)
+		fmt.Fprint(os.Stderr, usage)
 		return errors.New("no command given")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Nouns route separately from their verbs, so a missing verb reports the
+	// verb as missing rather than claiming the noun is unknown.
 	switch args[0] {
-	case "doctor":
-		return doctor(ctx)
-	case "tenant":
-		if len(args) > 1 && args[1] == "create" {
-			return tenantCreate(ctx, args[2:])
-		}
-	case "keys":
-		if len(args) > 1 && args[1] == "create" {
-			return keysCreate(ctx, args[2:])
-		}
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
+
+	case "doctor":
+		return doctor(ctx)
+
+	case "tenant":
+		return dispatch(ctx, "tenant", args[1:], map[string]subcommand{
+			"create": tenantCreate,
+		})
+
+	case "keys":
+		return dispatch(ctx, "keys", args[1:], map[string]subcommand{
+			"create": keysCreate,
+		})
 	}
 
-	fmt.Print(usage)
+	fmt.Fprint(os.Stderr, usage)
 	return fmt.Errorf("unknown command %q", args[0])
+}
+
+type subcommand func(ctx context.Context, args []string) error
+
+// dispatch routes a noun's verb, naming the valid verbs when one is missing or
+// unrecognised.
+func dispatch(ctx context.Context, noun string, args []string, verbs map[string]subcommand) error {
+	valid := make([]string, 0, len(verbs))
+	for v := range verbs {
+		valid = append(valid, v)
+	}
+	sort.Strings(valid)
+
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, usage)
+		return fmt.Errorf("%q needs a subcommand: %s", noun, strings.Join(valid, ", "))
+	}
+	fn, ok := verbs[args[0]]
+	if !ok {
+		fmt.Fprint(os.Stderr, usage)
+		return fmt.Errorf("unknown %s subcommand %q: expected %s", noun, args[0], strings.Join(valid, ", "))
+	}
+	return fn(ctx, args[1:])
 }
 
 func connect(ctx context.Context) (*pgxpool.Pool, error) {

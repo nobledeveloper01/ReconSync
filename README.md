@@ -285,7 +285,10 @@ export RECONSYNC_WEBHOOK_SECRET="$(openssl rand -hex 24)"
 
 go run ./cmd/reconsyncctl doctor
 go run ./cmd/reconsyncctl tenant create --id tnt_acme --env test
-go run ./cmd/reconsyncctl keys create --tenant tnt_acme --env test   # secret shown once
+go run ./cmd/reconsyncctl keys create --tenant tnt_acme --env test
+
+# The secret prints once. Export it — the calls below need it.
+export RECONSYNC_KEY="rs_test_..."
 
 go run ./cmd/reconsync
 ```
@@ -299,15 +302,22 @@ Report a debit, then its credit:
 ```bash
 curl -X POST localhost:8080/v1/events/debit \
   -H "Authorization: Bearer $RECONSYNC_KEY" \
+  -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000' \
-  -d '{"transaction_id":"TXN-1","transaction_type":"transfer","provider":"paystack",
-       "amount_minor":5000000,"currency":"NGN","debit_at":"2026-08-11T09:14:22Z"}'
+  -d "{\"transaction_id\":\"TXN-1\",\"transaction_type\":\"transfer\",\"provider\":\"paystack\",
+       \"amount_minor\":5000000,\"currency\":\"NGN\",\"debit_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 # 202 {"status":"accepted","expected_completion_at":"...","window_seconds":300}
 
 curl -X POST localhost:8080/v1/events/credit \
   -H "Authorization: Bearer $RECONSYNC_KEY" \
-  -d '{"transaction_id":"TXN-1","idempotency_key":"c1","status":"success"}'
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 550e8400-e29b-41d4-a716-446655440001' \
+  -d '{"transaction_id":"TXN-1","status":"success"}'
 ```
+
+`debit_at` is generated rather than fixed: a hard-coded past timestamp would
+already be outside its window on arrival and get detected as an orphan
+immediately, which is a confusing first experience.
 
 If no credit arrives before `expected_completion_at`, the sweep marks the debit
 orphaned and queues a signed `reversal.triggered` webhook:
