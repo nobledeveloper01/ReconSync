@@ -30,8 +30,12 @@ Usage:
   reconsyncctl doctor                          check the deployment is sound
   reconsyncctl tenant create --id ID [--name N] [--env test|live]
   reconsyncctl keys create --tenant ID [--env test|live]
+  reconsyncctl endpoints create --tenant ID --url URL [--events a,b]
+  reconsyncctl endpoints list --tenant ID
+  reconsyncctl endpoints test --tenant ID --id ENDPOINT_ID
 
 Reads RECONSYNC_DATABASE_URL from the environment.
+"endpoints test" also needs RECONSYNC_WEBHOOK_SECRET to sign the payload.
 `
 
 func run(args []string) error {
@@ -61,6 +65,13 @@ func run(args []string) error {
 	case "keys":
 		return dispatch(ctx, "keys", args[1:], map[string]subcommand{
 			"create": keysCreate,
+		})
+
+	case "endpoints":
+		return dispatch(ctx, "endpoints", args[1:], map[string]subcommand{
+			"create": endpointsCreate,
+			"list":   endpointsList,
+			"test":   endpointsTest,
 		})
 	}
 

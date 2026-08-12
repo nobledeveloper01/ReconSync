@@ -293,6 +293,18 @@ export RECONSYNC_KEY="rs_test_..."
 go run ./cmd/reconsync
 ```
 
+Register the endpoint that will receive reversal webhooks, and prove it works
+before a real reversal depends on it:
+
+```bash
+go run ./cmd/reconsyncctl endpoints create --tenant tnt_acme --url https://your-app.example.com/hooks/reconsync
+go run ./cmd/reconsyncctl endpoints test   --tenant tnt_acme --id we_...
+```
+
+`endpoints test` sends a signed `endpoint.test` payload to the real URL. Nobody
+otherwise exercises the reversal path until the first incident, which is the
+worst possible time to discover the receiver is broken.
+
 `doctor` checks database reachability, that every table exists, and **clock
 skew** — skew breaks webhook signature verification with an error message that
 tells the operator nothing, so it is worth surfacing directly.

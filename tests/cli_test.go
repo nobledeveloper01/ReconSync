@@ -158,6 +158,74 @@ func TestCLINoArgs(t *testing.T) {
 	}
 }
 
+// Endpoint validation runs before the database connection, so a bad URL is
+// reported while the operator is still typing rather than from a dead-letter
+// queue six hours later.
+func TestCLIEndpointsRejectsBadURLs(t *testing.T) {
+	cases := []struct {
+		name, url, want string
+	}{
+		{"plaintext http", "http://customer.example.com/hook", "must use https"},
+		{"loopback", "https://127.0.0.1/hook", "non-public address"},
+		{"private range", "https://10.0.0.5/hook", "non-public address"},
+		{"cloud metadata", "https://169.254.169.254/latest", "non-public address"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, code := runCtl(t, "endpoints", "create", "--tenant", "tnt_x", "--url", tc.url)
+
+			if code == 0 {
+				t.Fatalf("accepted %s", tc.url)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("stderr = %q, want it to mention %q", stderr, tc.want)
+			}
+		})
+	}
+
+	// The private-address refusal must name the escape hatch.
+	_, stderr, _ := runCtl(t, "endpoints", "create", "--tenant", "tnt_x", "--url", "https://127.0.0.1/hook")
+	if !strings.Contains(stderr, "--allow-private") {
+		t.Errorf("stderr = %q, want it to name the --allow-private flag", stderr)
+	}
+}
+
+func TestCLIEndpointsRequiresArguments(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"endpoints", "create", "--url", "https://x.example.com/h"}, "--tenant is required"},
+		{[]string{"endpoints", "create", "--tenant", "tnt_x"}, "--url is required"},
+		{[]string{"endpoints", "list"}, "--tenant is required"},
+		{[]string{"endpoints", "test", "--id", "we_1"}, "--tenant is required"},
+		{[]string{"endpoints", "test", "--tenant", "tnt_x"}, "--id is required"},
+	}
+	for _, tc := range cases {
+		_, stderr, code := runCtl(t, tc.args...)
+
+		if code == 0 {
+			t.Errorf("%v exited 0", tc.args)
+		}
+		if !strings.Contains(stderr, tc.want) {
+			t.Errorf("%v: stderr = %q, want %q", tc.args, stderr, tc.want)
+		}
+	}
+}
+
+// Signing a test payload needs the same secret the server signs with; say so
+// rather than sending an unverifiable payload.
+func TestCLIEndpointsTestRequiresSigningSecret(t *testing.T) {
+	_, stderr, code := runCtl(t, "endpoints", "test", "--tenant", "tnt_x", "--id", "we_1")
+
+	if code == 0 {
+		t.Fatal("exited 0 with no signing secret configured")
+	}
+	if !strings.Contains(stderr, "RECONSYNC_WEBHOOK_SECRET") {
+		t.Errorf("stderr = %q, want it to name the missing secret", stderr)
+	}
+}
+
 // Every command needing a database must say so, rather than failing obscurely.
 func TestCLIReportsMissingDatabaseURL(t *testing.T) {
 	for _, args := range [][]string{
