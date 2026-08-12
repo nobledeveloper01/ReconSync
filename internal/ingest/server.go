@@ -167,6 +167,7 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("GET /v1/transactions/{transaction_id}", s.handleGetTransaction)
 	api.HandleFunc("GET /v1/audit/verify", s.handleAuditVerify)
 	api.HandleFunc("GET /v1/reports/reversal-compliance", s.handleComplianceReport)
+	api.HandleFunc("GET /v1/reports/providers", s.handleProviderScorecard)
 	api.HandleFunc("POST /v1/fire-drill", s.handleFireDrill)
 	api.HandleFunc("POST /v1/reversals/{transaction_id}/claim", s.handleClaimReversal)
 	api.HandleFunc("POST /v1/reversals/{transaction_id}/claim/release", s.handleReleaseReversalClaim)

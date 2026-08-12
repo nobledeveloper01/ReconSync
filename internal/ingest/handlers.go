@@ -404,6 +404,59 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, http.StatusOK, result)
 }
 
+// handleProviderScorecard ranks a tenant's rails by how often they fail to
+// deliver and how long the successes take.
+func (s *Server) handleProviderScorecard(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if s.reports == nil {
+		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
+			"reporting is not configured on this deployment", "")
+		return
+	}
+
+	from, to, ok := s.reportPeriod(w, r)
+	if !ok {
+		return
+	}
+
+	stats, err := s.reports.ProviderStats(r.Context(), principal.TenantID, from, to)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, report.ScoreProviders(principal.TenantID, from, to, stats))
+}
+
+// reportPeriod parses the from/to window shared by the reports, defaulting to
+// the last 30 days so the common case needs no parameters.
+func (s *Server) reportPeriod(w http.ResponseWriter, r *http.Request) (from, to time.Time, ok bool) {
+	q := r.URL.Query()
+	now := s.now().UTC()
+
+	from, err := parseDay(q.Get("from"), now.AddDate(0, 0, -30))
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+			"from must be RFC3339 or YYYY-MM-DD", "from")
+		return time.Time{}, time.Time{}, false
+	}
+	to, err = parseDay(q.Get("to"), now)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+			"to must be RFC3339 or YYYY-MM-DD", "to")
+		return time.Time{}, time.Time{}, false
+	}
+	if !from.Before(to) {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+			"from must be before to", "from")
+		return time.Time{}, time.Time{}, false
+	}
+	return from, to, true
+}
+
 type claimRequest struct {
 	ClaimedBy string `json:"claimed_by"`
 }
@@ -605,22 +658,8 @@ func (s *Server) handleComplianceReport(w http.ResponseWriter, r *http.Request) 
 	q := r.URL.Query()
 	now := s.now().UTC()
 
-	// Defaults to the last 30 days, so the common case needs no parameters.
-	from, err := parseDay(q.Get("from"), now.AddDate(0, 0, -30))
-	if err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
-			"from must be RFC3339 or YYYY-MM-DD", "from")
-		return
-	}
-	to, err := parseDay(q.Get("to"), now)
-	if err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
-			"to must be RFC3339 or YYYY-MM-DD", "to")
-		return
-	}
-	if !from.Before(to) {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
-			"from must be before to", "from")
+	from, to, ok := s.reportPeriod(w, r)
+	if !ok {
 		return
 	}
 

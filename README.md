@@ -419,6 +419,38 @@ Counts are aggregated in the database; only transactions that actually reached
 `orphaned` are fetched in full. A healthy tenant's millions of settled
 transactions never cross the wire to be counted.
 
+### The provider scorecard — which rail is actually costing you
+
+`GET /v1/reports/providers` ranks a tenant's rails worst-first: how much each
+carried, how much it failed to deliver, how much it left unresolved, and how long
+the successes took to settle.
+
+The number that matters is the failure rate, and three things keep it honest:
+
+- **Over concluded transactions only.** A transaction still inside its window is
+  not a failure yet, and counting it as one would make every rail look worse
+  during a busy hour.
+- **Unresolved counts against the rail.** Being unable to get an answer is its
+  own reliability problem — every one of those cost a human an investigation, and
+  excluding them would flatter exactly the rails whose status APIs cannot be
+  reached.
+- **A rate on a thin sample is noise.** One failure out of three is not a 33%
+  failure rate, it is three transactions. Below 30 concluded the rate is still
+  shown — hiding it is its own distortion — but marked `low_sample`, because the
+  cost of being wrong here is rerouting real traffic.
+
+Latency is measured over settled transactions only; an orphan never got a credit,
+so including it would be measuring nothing. Percentiles use `percentile_disc`,
+which picks a value a real transaction actually took rather than interpolating
+between two, so an auditor can find it in the table.
+
+**One honest limitation.** The plan for this called it an industry benchmark
+built from every provider's behaviour across every tenant. ReconSync is
+self-hosted — each customer runs their own instance — so there is no cross-tenant
+data to aggregate, and a benchmark would need a deliberate opt-in telemetry
+product that does not exist. Every scorecard therefore says so in its `scope`
+field: this is your traffic, not the market's.
+
 ### `internal/pipeline` — bounded everything
 
 The §4.3 worker pool. Its whole job is to absorb load without ever blocking the
@@ -730,6 +762,7 @@ Because payloads come in more than one shape, a receiver should switch on
 | GET | `/v1/transactions?status=&limit=` | List by state. |
 | GET | `/v1/audit/verify` | Recompute the tenant's audit chain and report any tampering. |
 | GET | `/v1/reports/reversal-compliance` | Prove every reversal met its deadline. `format=json\|csv`. |
+| GET | `/v1/reports/providers` | Rank your rails by failure rate and settlement latency. |
 | POST | `/v1/fire-drill` | Send a synthetic reversal to your own endpoints and report what they did. |
 | POST | `/v1/reversals/{id}/claim` | Take the exclusive right to reverse. `409` if someone already holds it. |
 | POST | `/v1/reversals/{id}/claim/release` | Free a claim whose holder died before reversing. |
@@ -924,6 +957,7 @@ is delivered to the registered endpoint.
 | Silence alerting — `integration.silent` / `integration.recovered` | Done |
 | Fire drill — `POST /v1/fire-drill` | Done |
 | Reversal claim ledger — exactly-once interlock | Done |
+| Provider scorecard — `GET /v1/reports/providers` | Done — per-deployment, not an industry benchmark |
 | Provider corroboration — ask the rail instead of inferring from silence | Done |
 | Confidence score + evidence trail on every verdict | Done |
 | Audit hash chain + `GET /v1/audit/verify` | Done |

@@ -13,6 +13,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/audit"
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/report"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
 )
 
@@ -354,6 +355,14 @@ type ReportStore interface {
 	// ListReversalCandidates returns, in full, only the transactions that
 	// reached orphaned or beyond — the ones an SLA can be measured against.
 	ListReversalCandidates(ctx context.Context, tenantID string, from, to time.Time, limit int) ([]*domain.Transaction, error)
+
+	// ProviderStats aggregates per rail: how much each carried, how much it
+	// failed to deliver, and how long the successes took.
+	//
+	// The return type lives in report because it is a report input, and
+	// duplicating it here would only add a conversion with nothing to say.
+	// report imports nothing but domain, so this cannot cycle.
+	ProviderStats(ctx context.Context, tenantID string, from, to time.Time) ([]report.ProviderStat, error)
 }
 
 // Store is the full persistence surface.
