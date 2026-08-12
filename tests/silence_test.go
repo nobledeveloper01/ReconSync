@@ -106,7 +106,11 @@ func testSilenceCheckDisabled(t *testing.T, s store.Store) {
 func testSyncSilenceEpisodes(t *testing.T, s store.Store) {
 	seedTenants(t, s)
 	ctx := context.Background()
-	now := time.Now().UTC()
+	// Truncated to what Postgres actually stores: timestamptz keeps
+	// microseconds, so a nanosecond-precision input would not survive the round
+	// trip and the equality below would fail on the rounding rather than on
+	// anything the code did.
+	now := time.Now().UTC().Truncate(time.Microsecond)
 
 	first, err := s.SyncSilenceEpisodes(ctx, []string{tenantA}, now)
 	if err != nil {
