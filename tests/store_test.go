@@ -59,6 +59,10 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"IngestHealthRoundTrip", testIngestHealthRoundTrip},
 		{"IngestHealthAccumulates", testIngestHealthAccumulates},
 		{"ClaimExpiredRoutesGapToSuspect", testClaimExpiredGapToSuspect},
+		{"SilentTenants", testSilentTenants},
+		{"LowVolumeTenantIsNotSilent", testLowVolumeTenantIsNotSilent},
+		{"SilenceCheckDisabled", testSilenceCheckDisabled},
+		{"ClaimExpiredSkipsTenants", testClaimExpiredSkipsTenants},
 		{"TenantIsolation", testTenantIsolation},
 	}
 

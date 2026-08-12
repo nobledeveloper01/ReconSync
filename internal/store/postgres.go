@@ -414,9 +414,14 @@ func (p *Postgres) ListByStatus(ctx context.Context, tenantID string, status dom
 
 // ClaimExpired implements the §4.4 sweep. SKIP LOCKED makes it safe across
 // replicas with no leader election.
-func (p *Postgres) ClaimExpired(ctx context.Context, now time.Time, limit int) ([]*domain.Transaction, error) {
+func (p *Postgres) ClaimExpired(ctx context.Context, now time.Time, limit int, opts ...ClaimOption) ([]*domain.Transaction, error) {
 	if limit <= 0 {
 		limit = 500
+	}
+	cfg := ResolveClaimOptions(opts)
+	skip := cfg.SkipTenants
+	if skip == nil {
+		skip = []string{}
 	}
 	// The gap check rides in the same statement as the claim, so a transaction
 	// cannot be claimed under one verdict and reclassified under another.
@@ -444,11 +449,12 @@ func (p *Postgres) ClaimExpired(ctx context.Context, now time.Time, limit int) (
 			SELECT id FROM transactions
 			WHERE status IN ('pending_debit','pending_unknown')
 			  AND expected_completion_at <= $1
+			  AND NOT (tenant_id = ANY($3))
 			ORDER BY expected_completion_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT $2
 		)
-		RETURNING `+txnColumns, now, limit)
+		RETURNING `+txnColumns, now, limit, skip)
 	if err != nil {
 		return nil, fmt.Errorf("claim expired: %w", err)
 	}

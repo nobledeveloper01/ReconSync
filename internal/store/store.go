@@ -78,12 +78,36 @@ type TransactionStore interface {
 	DeleteParkedCredit(ctx context.Context, tenantID, transactionID string) error
 
 	// ClaimExpired atomically marks open transactions whose window has closed as
-	// orphaned and returns them.
+	// orphaned and returns them. SkipTenants excludes tenants we cannot
+	// currently vouch for.
 	//
 	// Deliberately not tenant-scoped: the scheduler sweeps all tenants, and
 	// per-tenant polling would not scale. It is the single exception to the
 	// tenantID-first rule and never runs on a request path.
-	ClaimExpired(ctx context.Context, now time.Time, limit int) ([]*domain.Transaction, error)
+	ClaimExpired(ctx context.Context, now time.Time, limit int, opts ...ClaimOption) ([]*domain.Transaction, error)
+}
+
+// ClaimOption adjusts a detection sweep.
+type ClaimOption func(*ClaimConfig)
+
+// ClaimConfig is the resolved set of sweep options.
+type ClaimConfig struct {
+	SkipTenants []string
+}
+
+// SkipTenants excludes tenants from a sweep. Used when a tenant has gone silent
+// and nothing can be concluded about their transactions.
+func SkipTenants(ids ...string) ClaimOption {
+	return func(c *ClaimConfig) { c.SkipTenants = append(c.SkipTenants, ids...) }
+}
+
+// ResolveClaimOptions applies options, for implementations.
+func ResolveClaimOptions(opts []ClaimOption) ClaimConfig {
+	var c ClaimConfig
+	for _, opt := range opts {
+		opt(&c)
+	}
+	return c
 }
 
 // TenantStore manages tenant records. Admin-plane only.
@@ -222,6 +246,26 @@ type HealthStore interface {
 
 	// IngestActivity summarises what a tenant sent, for the silence check.
 	IngestActivity(ctx context.Context, tenantID string, from, to time.Time) (IngestActivitySummary, error)
+
+	// SilentTenants returns tenants that were sending steadily and have stopped.
+	//
+	// Zero events from a tenant that normally sends thousands is a broken
+	// integration, not a quiet period — and nothing can be concluded about their
+	// individual transactions while it lasts.
+	SilentTenants(ctx context.Context, now time.Time, p SilenceParams) ([]string, error)
+}
+
+// SilenceParams defines what counts as anomalous silence.
+type SilenceParams struct {
+	// Quiet is how long a tenant must have sent nothing.
+	Quiet time.Duration
+
+	// Baseline is the period before that in which they must have been active,
+	// so a genuinely low-volume tenant is never mistaken for a broken one.
+	Baseline time.Duration
+
+	// MinActiveBuckets is how many minutes of the baseline must carry events.
+	MinActiveBuckets int
 }
 
 // Store is the full persistence surface.

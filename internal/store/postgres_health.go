@@ -63,6 +63,52 @@ func (p *Postgres) HasIngestGap(ctx context.Context, tenantID string, from, to t
 	return exists, nil
 }
 
+// SilentTenants finds tenants that were sending steadily and have stopped.
+//
+// The baseline requirement is what stops a low-volume tenant being mistaken for
+// a broken one: a tenant that sends four events a day is not "silent" between
+// them, and suppressing their detection would be a bug, not a safeguard.
+func (p *Postgres) SilentTenants(ctx context.Context, now time.Time, params SilenceParams) ([]string, error) {
+	if params.Quiet <= 0 || params.Baseline <= 0 || params.MinActiveBuckets <= 0 {
+		return nil, nil
+	}
+
+	quietFrom := now.UTC().Add(-params.Quiet)
+	baselineFrom := quietFrom.Add(-params.Baseline)
+
+	rows, err := p.pool.Query(ctx, `
+		SELECT b.tenant_id
+		FROM ingest_health b
+		WHERE b.bucket >= date_trunc('minute', $1::timestamptz)
+		  AND b.bucket <  date_trunc('minute', $2::timestamptz)
+		GROUP BY b.tenant_id
+		HAVING COUNT(*) FILTER (WHERE b.received > 0) >= $3
+		   AND NOT EXISTS (
+		       SELECT 1 FROM ingest_health q
+		       WHERE q.tenant_id = b.tenant_id
+		         AND q.bucket >= date_trunc('minute', $2::timestamptz)
+		         AND q.received > 0
+		   )`,
+		baselineFrom, quietFrom, params.MinActiveBuckets)
+	if err != nil {
+		return nil, fmt.Errorf("find silent tenants: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan silent tenant: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate silent tenants: %w", err)
+	}
+	return out, nil
+}
+
 // IngestActivity summarises what a tenant sent over a period, for the silence
 // check.
 func (p *Postgres) IngestActivity(ctx context.Context, tenantID string, from, to time.Time) (IngestActivitySummary, error) {

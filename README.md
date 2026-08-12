@@ -201,6 +201,28 @@ minute the window spans lost events. If one did, the transaction goes to
 
 Without this, a burst of backpressure silently becomes a burst of reversals.
 
+The same counters answer a second question: **has this tenant stopped sending
+altogether?** Zero events from a tenant that normally sends thousands an hour is
+a broken integration, not a quiet spell — and nothing can be concluded about any
+of their individual transactions while it lasts.
+
+Sweeping them anyway would fire a reversal for every debit in flight, hundreds of
+them, into a system that is already down, at the worst possible moment. So a
+silent tenant is skipped entirely and one alert is raised instead of a thousand
+webhooks. Their transactions stay open and settle normally once the tenant
+recovers and sends the credits it owes.
+
+A tenant is only "silent" if it was *previously* active — ten or more minutes
+carrying events in the preceding hour. Without that baseline a genuinely
+low-volume tenant, or a brand new deployment with no history, would be mistaken
+for a broken one and never have anything detected at all.
+
+Deliberate consequence: a tenant that goes silent and never returns has its
+transactions held indefinitely rather than reversed. That is the right call —
+firing reversals into a dead integration helps nobody, and the held transactions
+are visible through `GET /v1/transactions?status=pending_debit` and the sweep's
+own alert.
+
 The check is deliberately conservative: we cannot know *which* events a drop
 destroyed, so any overlap makes the window unreliable. Some genuinely orphaned
 transactions will wait for a human. That is the right direction to be wrong in —
@@ -602,6 +624,7 @@ is delivered to the registered endpoint.
 | Server binary and admin CLI | Done |
 | `make demo` — one command to a verified webhook | Done |
 | Ingest-gap awareness — never reverse on our own blind spot | Done |
+| Silence suppression — never mass-reverse during a tenant outage | Done |
 | Docker Compose quickstart | **Not started** — needs a machine with Docker to verify |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |

@@ -293,12 +293,20 @@ func (m *Memory) ListByStatus(_ context.Context, tenantID string, status domain.
 	return out, nil
 }
 
-func (m *Memory) ClaimExpired(_ context.Context, now time.Time, limit int) ([]*domain.Transaction, error) {
+func (m *Memory) ClaimExpired(_ context.Context, now time.Time, limit int, opts ...ClaimOption) ([]*domain.Transaction, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	skip := make(map[string]struct{})
+	for _, id := range ResolveClaimOptions(opts).SkipTenants {
+		skip[id] = struct{}{}
+	}
+
 	var due []*domain.Transaction
-	for _, txns := range m.byTenant {
+	for tenantID, txns := range m.byTenant {
+		if _, skipped := skip[tenantID]; skipped {
+			continue
+		}
 		for _, t := range txns {
 			if t.IsExpiredAt(now) {
 				due = append(due, t)

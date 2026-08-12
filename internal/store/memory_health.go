@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"sort"
 	"time"
 )
 
@@ -49,6 +50,42 @@ func (m *Memory) hasGapLocked(tenantID string, from, to time.Time) bool {
 		}
 	}
 	return false
+}
+
+func (m *Memory) SilentTenants(_ context.Context, now time.Time, params SilenceParams) ([]string, error) {
+	if params.Quiet <= 0 || params.Baseline <= 0 || params.MinActiveBuckets <= 0 {
+		return nil, nil
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	quietFrom := now.UTC().Add(-params.Quiet).Truncate(time.Minute)
+	baselineFrom := quietFrom.Add(-params.Baseline)
+
+	active := map[string]int{}  // minutes with events during the baseline
+	recent := map[string]bool{} // any events since the quiet period began
+
+	for key, v := range m.health {
+		if v.Received <= 0 {
+			continue
+		}
+		switch {
+		case !key.bucket.Before(quietFrom):
+			recent[key.tenantID] = true
+		case !key.bucket.Before(baselineFrom):
+			active[key.tenantID]++
+		}
+	}
+
+	var out []string
+	for tenantID, buckets := range active {
+		if buckets >= params.MinActiveBuckets && !recent[tenantID] {
+			out = append(out, tenantID)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (m *Memory) IngestActivity(_ context.Context, tenantID string, from, to time.Time) (IngestActivitySummary, error) {

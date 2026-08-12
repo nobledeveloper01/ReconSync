@@ -4,6 +4,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -20,6 +21,21 @@ const DefaultDetectInterval = 5 * time.Second
 // DefaultDetectBatch bounds one sweep.
 const DefaultDetectBatch = 500
 
+// Defaults for the silence check.
+//
+// A tenant that normally sends events steadily and has sent nothing for
+// DefaultQuietPeriod has a broken integration, not a quiet spell. Nothing can be
+// concluded about their individual transactions until it is fixed.
+//
+// The baseline requirement is what keeps a genuinely low-volume tenant from
+// being mistaken for a broken one — a tenant sending four events a day is not
+// silent between them, and suppressing their detection would be a bug.
+const (
+	DefaultQuietPeriod      = 5 * time.Minute
+	DefaultBaselinePeriod   = time.Hour
+	DefaultMinActiveBuckets = 10
+)
+
 // Detector sweeps for transactions whose reconciliation window has closed and
 // queues the reversal webhook.
 type Detector struct {
@@ -28,6 +44,7 @@ type Detector struct {
 	now      func() time.Time
 	interval time.Duration
 	batch    int
+	silence  store.SilenceParams
 }
 
 // DetectorOptions configures a Detector.
@@ -36,6 +53,10 @@ type DetectorOptions struct {
 	Now      func() time.Time
 	Interval time.Duration
 	Batch    int
+
+	// Silence tunes when a tenant is considered too quiet to judge. A zero
+	// Quiet, Baseline or MinActiveBuckets disables the check entirely.
+	Silence *store.SilenceParams
 }
 
 // NewDetector builds a Detector.
@@ -55,6 +76,15 @@ func NewDetector(s store.Store, opts DetectorOptions) (*Detector, error) {
 	}
 	if d.batch <= 0 {
 		d.batch = DefaultDetectBatch
+	}
+	if opts.Silence != nil {
+		d.silence = *opts.Silence
+	} else {
+		d.silence = store.SilenceParams{
+			Quiet:            DefaultQuietPeriod,
+			Baseline:         DefaultBaselinePeriod,
+			MinActiveBuckets: DefaultMinActiveBuckets,
+		}
 	}
 	return d, nil
 }
@@ -85,6 +115,9 @@ type SweepResult struct {
 	Queued   int
 	Suspect  int
 	NoTarget int // orphaned but the tenant has no enabled endpoint
+
+	// SilentTenants were skipped entirely because they have stopped sending.
+	SilentTenants []string
 }
 
 // Sweep claims expired transactions and queues their notifications.
@@ -92,7 +125,29 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 	var res SweepResult
 
 	now := d.now().UTC()
-	claimed, err := d.store.ClaimExpired(ctx, now, d.batch)
+
+	// A tenant that has stopped sending tells us nothing about any individual
+	// transaction. Sweeping them anyway would fire a reversal for every debit
+	// in flight — thousands of them, into a system that is already broken, at
+	// the worst possible moment. Skip them and raise one alert instead.
+	silent, err := d.store.SilentTenants(ctx, now, d.silence)
+	if err != nil {
+		return res, fmt.Errorf("check for silent tenants: %w", err)
+	}
+	res.SilentTenants = silent
+
+	for _, tenantID := range silent {
+		d.log.WarnContext(ctx, "tenant has stopped sending events; detection suppressed",
+			slog.String("tenant_id", tenantID),
+			slog.Duration("quiet_for_at_least", d.silence.Quiet))
+	}
+
+	var opts []store.ClaimOption
+	if len(silent) > 0 {
+		opts = append(opts, store.SkipTenants(silent...))
+	}
+
+	claimed, err := d.store.ClaimExpired(ctx, now, d.batch, opts...)
 	if err != nil {
 		return res, err
 	}
