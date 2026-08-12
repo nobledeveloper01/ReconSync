@@ -107,12 +107,13 @@ func newIngestFixture(t *testing.T, opts fixtureOpts) *ingestFixture {
 	}
 
 	srv, err := ingest.New(ingest.Options{
-		Sink:  p,
-		Rules: ruleProvider,
-		Store: s,
-		Audit: s,
-		Auth:  authenticator,
-		Ready: opts.ready,
+		Sink:    p,
+		Rules:   ruleProvider,
+		Store:   s,
+		Audit:   s,
+		Reports: s,
+		Auth:    authenticator,
+		Ready:   opts.ready,
 	})
 	if err != nil {
 		t.Fatalf("ingest.New: %v", err)
@@ -711,6 +712,77 @@ func TestIngestAuditVerify(t *testing.T) {
 	}
 	if w := f.do(t, http.MethodGet, "/v1/audit/verify?limit=0", f.keyA, nil); w.Code != http.StatusBadRequest {
 		t.Errorf("limit=0 = %d, want 400", w.Code)
+	}
+}
+
+func TestIngestComplianceReport(t *testing.T) {
+	f := newIngestFixture(t, fixtureOpts{})
+	ctx := context.Background()
+
+	// One detected transaction, so the report has something to measure.
+	mustUpsert(t, f.store, newExpiredTxn(tenantA, "TX-LATE", 5*time.Minute, time.Minute))
+	if _, err := f.store.ClaimExpired(ctx, time.Now().UTC(), 10); err != nil {
+		t.Fatalf("ClaimExpired: %v", err)
+	}
+
+	w := f.do(t, http.MethodGet, "/v1/reports/reversal-compliance", f.keyA, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	if body["tenant_id"] != tenantA {
+		t.Errorf("tenant_id = %v", body["tenant_id"])
+	}
+	// The default deadline must be stated, not implied.
+	if body["reversal_deadline_seconds"] != float64(86400) {
+		t.Errorf("deadline = %v, want 86400", body["reversal_deadline_seconds"])
+	}
+	if _, ok := body["compliance"]; !ok {
+		t.Error("no compliance section")
+	}
+
+	// A short deadline turns the same data into a breach.
+	w = f.do(t, http.MethodGet, "/v1/reports/reversal-compliance?deadline_seconds=1", f.keyA, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	compliance, _ := decodeBody(t, w)["compliance"].(map[string]any)
+	if compliance["breached"] != float64(1) {
+		t.Errorf("breached = %v, want 1 with a 1s deadline", compliance["breached"])
+	}
+
+	// CSV is what a compliance team actually works from.
+	w = f.do(t, http.MethodGet, "/v1/reports/reversal-compliance?deadline_seconds=1&format=csv", f.keyA, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("csv status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+		t.Errorf("content-type = %q, want text/csv", ct)
+	}
+	if !strings.Contains(w.Body.String(), "TX-LATE") {
+		t.Errorf("csv missing the breach: %s", w.Body.String())
+	}
+
+	// PDF is in the specification but not built; say so rather than returning
+	// something that is not a PDF.
+	if w := f.do(t, http.MethodGet, "/v1/reports/reversal-compliance?format=pdf", f.keyA, nil); w.Code != http.StatusBadRequest {
+		t.Errorf("pdf = %d, want 400", w.Code)
+	}
+
+	for _, q := range []string{"?from=nonsense", "?deadline_seconds=0", "?from=2026-08-10&to=2026-08-01"} {
+		if w := f.do(t, http.MethodGet, "/v1/reports/reversal-compliance"+q, f.keyA, nil); w.Code != http.StatusBadRequest {
+			t.Errorf("query %q = %d, want 400", q, w.Code)
+		}
+	}
+
+	// Tenant B has its own, empty, report.
+	w = f.do(t, http.MethodGet, "/v1/reports/reversal-compliance", f.keyB, nil)
+	if totals, _ := decodeBody(t, w)["totals"].(map[string]any); totals["orphans_detected"] != float64(0) {
+		t.Errorf("tenant B saw %v of tenant A's orphans", totals["orphans_detected"])
+	}
+
+	if w := f.do(t, http.MethodGet, "/v1/reports/reversal-compliance", "", nil); w.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated = %d, want 401", w.Code)
 	}
 }
 

@@ -286,6 +286,17 @@ type AuditStore interface {
 	ListAudit(ctx context.Context, tenantID string, limit int) ([]audit.Record, error)
 }
 
+// ReportStore backs the compliance report.
+type ReportStore interface {
+	// CountByStatus aggregates in the database, so a healthy tenant's millions
+	// of settled transactions are never dragged across the wire to be counted.
+	CountByStatus(ctx context.Context, tenantID string, from, to time.Time) (map[domain.Status]int, error)
+
+	// ListReversalCandidates returns, in full, only the transactions that
+	// reached orphaned or beyond — the ones an SLA can be measured against.
+	ListReversalCandidates(ctx context.Context, tenantID string, from, to time.Time, limit int) ([]*domain.Transaction, error)
+}
+
 // Store is the full persistence surface.
 type Store interface {
 	TransactionStore
@@ -295,4 +306,5 @@ type Store interface {
 	RuleStore
 	HealthStore
 	AuditStore
+	ReportStore
 }

@@ -54,6 +54,9 @@ type Options struct {
 	// reports that verification is unavailable rather than pretending to pass.
 	Audit store.AuditStore
 
+	// Reports backs GET /v1/reports/reversal-compliance. Optional.
+	Reports store.ReportStore
+
 	// Ready reports dependency health for /readyz. Liveness never calls it.
 	Ready func(ctx context.Context) error
 
@@ -72,6 +75,7 @@ type Server struct {
 	rules   RuleProvider
 	store   store.TransactionStore
 	audit   store.AuditStore
+	reports store.ReportStore
 	auth    *auth.Authenticator
 	ready   func(ctx context.Context) error
 	log     *slog.Logger
@@ -101,6 +105,7 @@ func New(opts Options) (*Server, error) {
 		rules:       opts.Rules,
 		store:       opts.Store,
 		audit:       opts.Audit,
+		reports:     opts.Reports,
 		auth:        opts.Auth,
 		ready:       opts.Ready,
 		log:         opts.Logger,
@@ -143,6 +148,7 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("GET /v1/transactions", s.handleListTransactions)
 	api.HandleFunc("GET /v1/transactions/{transaction_id}", s.handleGetTransaction)
 	api.HandleFunc("GET /v1/audit/verify", s.handleAuditVerify)
+	api.HandleFunc("GET /v1/reports/reversal-compliance", s.handleComplianceReport)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", s.authenticate(api))

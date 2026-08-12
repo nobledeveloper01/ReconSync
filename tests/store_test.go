@@ -68,6 +68,8 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"AuditChainAppend", testAuditChainAppend},
 		{"AuditRoundTripsContent", testAuditRoundTripsContent},
 		{"AuditChainsAreTenantScoped", testAuditChainsAreTenantScoped},
+		{"CountByStatus", testCountByStatus},
+		{"ListReversalCandidates", testListReversalCandidates},
 		{"TenantIsolation", testTenantIsolation},
 	}
 
@@ -1071,6 +1073,95 @@ func testClaimExpiredGapToSuspect(t *testing.T, s store.Store) {
 		if c.Status != domain.StatusSuspect {
 			t.Errorf("%s = %s, want suspect — a gap covered its window", c.TransactionID, c.Status)
 		}
+	}
+}
+
+func testCountByStatus(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustUpsert(t, s,
+		newDebitTxn(tenantA, "OPEN-1", time.Hour),
+		newDebitTxn(tenantA, "OPEN-2", time.Hour),
+		newDebitTxn(tenantA, "SETTLED", time.Hour),
+	)
+	if _, err := s.ApplyCredit(ctx, tenantA, "SETTLED", domain.StatusCompleted, now); err != nil {
+		t.Fatalf("ApplyCredit: %v", err)
+	}
+	mustUpsert(t, s, newDebitTxn(tenantB, "OTHER", time.Hour))
+
+	counts, err := s.CountByStatus(ctx, tenantA, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CountByStatus: %v", err)
+	}
+	if counts[domain.StatusPendingDebit] != 2 {
+		t.Errorf("pending = %d, want 2", counts[domain.StatusPendingDebit])
+	}
+	if counts[domain.StatusCompleted] != 1 {
+		t.Errorf("completed = %d, want 1", counts[domain.StatusCompleted])
+	}
+
+	// The period is half-open, so a window that ends before the debit sees none.
+	empty, err := s.CountByStatus(ctx, tenantA, now.Add(-48*time.Hour), now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("CountByStatus: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("out-of-period counts = %v, want none", empty)
+	}
+
+	// Tenant B's transaction must not appear in tenant A's totals.
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	if total != 3 {
+		t.Errorf("total = %d, want 3", total)
+	}
+}
+
+// Only transactions that were actually detected can be measured against a
+// reversal SLA, and fetching only those is what keeps the report cheap.
+func testListReversalCandidates(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustUpsert(t, s,
+		newExpiredTxn(tenantA, "DETECTED", 5*time.Minute, time.Minute),
+		newExpiredTxn(tenantA, "DETECTED-2", 4*time.Minute, time.Minute),
+		newDebitTxn(tenantA, "HEALTHY", time.Hour),
+	)
+	if _, err := s.ClaimExpired(ctx, now, 10); err != nil {
+		t.Fatalf("ClaimExpired: %v", err)
+	}
+
+	got, err := s.ListReversalCandidates(ctx, tenantA, now.Add(-time.Hour), now.Add(time.Hour), 0)
+	if err != nil {
+		t.Fatalf("ListReversalCandidates: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("candidates = %v, want the two detected", txnIDs(got))
+	}
+	if got[0].DetectedAt == nil {
+		t.Error("candidate has no detected_at")
+	}
+
+	// The limit must be exact: the report probes for overflow by asking for one
+	// more than it can handle, so a store that returns extra rows would turn a
+	// complete report into one falsely marked incomplete, and one that returns
+	// too few would hide the overflow entirely.
+	capped, err := s.ListReversalCandidates(ctx, tenantA, now.Add(-time.Hour), now.Add(time.Hour), 1)
+	if err != nil {
+		t.Fatalf("ListReversalCandidates limited: %v", err)
+	}
+	if len(capped) != 1 {
+		t.Errorf("limit 1 returned %d rows", len(capped))
+	}
+
+	if other, err := s.ListReversalCandidates(ctx, tenantB, now.Add(-time.Hour), now.Add(time.Hour), 0); err != nil || len(other) != 0 {
+		t.Errorf("tenant B saw %d of tenant A's candidates (err=%v)", len(other), err)
 	}
 }
 

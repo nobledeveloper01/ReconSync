@@ -171,13 +171,14 @@ func run() error {
 	}
 
 	api, err := ingest.New(ingest.Options{
-		Sink:   pipe,
-		Rules:  ruleProvider,
-		Store:  db,
-		Audit:  db,
-		Auth:   authenticator,
-		Logger: log,
-		Ready:  func(ctx context.Context) error { return pool.Ping(ctx) },
+		Sink:    pipe,
+		Rules:   ruleProvider,
+		Store:   db,
+		Audit:   db,
+		Reports: db,
+		Auth:    authenticator,
+		Logger:  log,
+		Ready:   func(ctx context.Context) error { return pool.Ping(ctx) },
 	})
 	if err != nil {
 		return err

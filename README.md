@@ -361,6 +361,41 @@ first showed up as a real test failure at eight concurrent writers.
 The detection sweep writes each verdict here with its full evidence, so **"why
 did you reverse this six months ago"** is answerable from the database.
 
+### `internal/report` — the evidence a compliance officer produces
+
+The question a regulator asks is not "does your system work" but *"show me every
+failed transfer in this period and prove you reversed it in time"*.
+`GET /v1/reports/reversal-compliance` answers exactly that, as JSON or CSV.
+
+Three decisions in it are worth stating, because each is a way the number could
+have been quietly wrong:
+
+- **Outstanding is its own category.** A reversal still in flight is neither
+  compliant nor breached. Counting it as either would misstate the position, so
+  the compliance rate is computed over concluded cases only.
+- **No rate when nothing has concluded.** `0%` and *"no data"* are different
+  claims, so the field is simply absent rather than zero.
+- **Past the deadline, "in flight" stops being honest.** An unconfirmed reversal
+  whose deadline has passed counts as breached, not outstanding — and a
+  dead-lettered one is breached whatever the clock says, because nobody acted.
+
+A report that silently drops breaches is worse than no report, so both ways of
+running short are declared:
+
+- `truncated: true` — the itemised list hit its cap. The *counts* are still
+  exact; only the listing is short.
+- `incomplete: true` — more transactions were detected in the period than one
+  report examines, so every count is a lower bound. It comes with a `notice`
+  saying so in words, because this is the one case where the numbers are wrong.
+
+The deadline is a parameter, not a constant: the mandate differs by regulator and
+transaction type, and baking in one jurisdiction's number would quietly produce
+wrong reports everywhere else.
+
+Counts are aggregated in the database; only transactions that actually reached
+`orphaned` are fetched in full. A healthy tenant's millions of settled
+transactions never cross the wire to be counted.
+
 ### `internal/pipeline` — bounded everything
 
 The §4.3 worker pool. Its whole job is to absorb load without ever blocking the
@@ -586,6 +621,7 @@ without knowing our rules — it removes a whole category of integration questio
 | GET | `/v1/transactions/{id}` | One transaction. |
 | GET | `/v1/transactions?status=&limit=` | List by state. |
 | GET | `/v1/audit/verify` | Recompute the tenant's audit chain and report any tampering. |
+| GET | `/v1/reports/reversal-compliance` | Prove every reversal met its deadline. `format=json\|csv`. |
 | GET | `/healthz` `/readyz` `/metrics` | Liveness, readiness, Prometheus metrics. |
 
 Ingest is asynchronous, so both event endpoints return `202 Accepted` rather
@@ -742,6 +778,7 @@ internal/audit/      the verifiable hash chain
 internal/evidence/   what a verdict rests on, and how sure we are
 internal/health/     records whether our own view of each tenant was intact
 internal/provider/   asks the rail what actually happened, instead of guessing
+internal/report/     the reversal SLA compliance report
 internal/webhook/    payload signing, retry policy, SSRF-guarded client
 internal/service/    detection sweep and webhook dispatch loops
 migrations/          schema, applied forward and backward in tests
@@ -775,9 +812,10 @@ is delivered to the registered endpoint.
 | Provider corroboration — ask the rail instead of inferring from silence | Done |
 | Confidence score + evidence trail on every verdict | Done |
 | Audit hash chain + `GET /v1/audit/verify` | Done |
+| Reversal SLA compliance report (JSON + CSV) | Done |
 | Signed chain checkpoints published externally | **Not started** |
 | Docker Compose quickstart | **Not started** — needs a machine with Docker to verify |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |
-| Audit hash chain and signed checkpoints | **Not started** |
-| Dashboard, SDKs, bulk reporting | **Not started** |
+| PDF report export | **Not started** — JSON and CSV only |
+| Dashboard, SDKs | **Not started** |

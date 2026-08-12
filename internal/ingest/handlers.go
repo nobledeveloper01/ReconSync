@@ -14,6 +14,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
+	"github.com/nobledeveloper01/ReconSync/internal/report"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
 )
 
@@ -383,6 +384,120 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 	// failed request — 200 with verified:false. A 5xx would suggest our bug and
 	// send the operator looking in the wrong place.
 	s.writeJSON(w, r, http.StatusOK, result)
+}
+
+// maxReportCandidates bounds how many detected transactions one report examines.
+// Exceeding it is a real event — that many failures in one period is a crisis,
+// not a routine report — so it is surfaced, never silently absorbed.
+const maxReportCandidates = 10000
+
+// handleComplianceReport answers the question a regulator actually asks: show me
+// every failed transfer in this period and prove you reversed it in time.
+func (s *Server) handleComplianceReport(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if s.reports == nil {
+		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
+			"reporting is not configured on this deployment", "")
+		return
+	}
+
+	q := r.URL.Query()
+	now := s.now().UTC()
+
+	// Defaults to the last 30 days, so the common case needs no parameters.
+	from, err := parseDay(q.Get("from"), now.AddDate(0, 0, -30))
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+			"from must be RFC3339 or YYYY-MM-DD", "from")
+		return
+	}
+	to, err := parseDay(q.Get("to"), now)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+			"to must be RFC3339 or YYYY-MM-DD", "to")
+		return
+	}
+	if !from.Before(to) {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+			"from must be before to", "from")
+		return
+	}
+
+	// The mandated reversal window differs by regulator and transaction type, so
+	// it is a parameter. Baking in one jurisdiction's number would quietly
+	// produce wrong reports everywhere else.
+	deadline := report.DefaultReversalDeadline
+	if raw := q.Get("deadline_seconds"); raw != "" {
+		secs, convErr := strconv.Atoi(raw)
+		if convErr != nil || secs <= 0 {
+			s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+				"deadline_seconds must be a positive integer", "deadline_seconds")
+			return
+		}
+		deadline = time.Duration(secs) * time.Second
+	}
+
+	counts, err := s.reports.CountByStatus(r.Context(), principal.TenantID, from, to)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+	// One over the cap, so a tenant that exceeds it is detected rather than
+	// silently reported on with understated counts.
+	candidates, err := s.reports.ListReversalCandidates(r.Context(), principal.TenantID, from, to, maxReportCandidates+1)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+	incomplete := len(candidates) > maxReportCandidates
+	if incomplete {
+		candidates = candidates[:maxReportCandidates]
+	}
+
+	doc := report.Compute(report.Input{
+		TenantID:       principal.TenantID,
+		From:           from,
+		To:             to,
+		CountsByStatus: counts,
+		Reversals:      candidates,
+		Incomplete:     incomplete,
+	}, deadline, now)
+
+	switch q.Get("format") {
+	case "", "json":
+		s.writeJSON(w, r, http.StatusOK, doc)
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf("attachment; filename=\"reversal-compliance-%s.csv\"", from.Format("2006-01-02")))
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, doc.CSV())
+	default:
+		// PDF is in the specification but not built. Saying so beats returning
+		// something that is not a PDF under a pdf request.
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+			"format must be json or csv; pdf is not yet supported", "format")
+	}
+}
+
+// parseDay accepts a full timestamp or a plain date, since a compliance officer
+// types the latter.
+func parseDay(raw string, fallback time.Time) (time.Time, error) {
+	if raw == "" {
+		return fallback.UTC(), nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC(), nil
+	}
+	t, err := time.Parse("2006-01-02", raw)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return t.UTC(), nil
 }
 
 // handleHealthz reports process liveness only. It must never consult the
