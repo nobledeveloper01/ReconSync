@@ -37,6 +37,9 @@ type Memory struct {
 	// reconciliation rules by tenant
 	rules map[string][]rules.Rule
 
+	// ingest counters by tenant and minute
+	health map[healthKey]IngestSample
+
 	nextID         int64
 	nextDeliveryID int64
 	nextRuleID     int64
@@ -55,6 +58,7 @@ func NewMemory() *Memory {
 		deliveries: make(map[int64]*DeliveryRecord),
 		payloads:   make(map[int64][]byte),
 		rules:      make(map[string][]rules.Rule),
+		health:     make(map[healthKey]IngestSample),
 	}
 }
 
@@ -313,6 +317,11 @@ func (m *Memory) ClaimExpired(_ context.Context, now time.Time, limit int) ([]*d
 	for _, t := range due {
 		target := domain.StatusOrphaned
 		if t.Status == domain.StatusPendingUnknown {
+			target = domain.StatusSuspect
+		}
+		// An ingest gap over this window means the missing credit proves
+		// nothing, so it must not auto-reverse (ADR-0004).
+		if m.hasGapLocked(t.TenantID, t.DebitAt, t.ExpectedCompletionAt) {
 			target = domain.StatusSuspect
 		}
 		t.Status = target

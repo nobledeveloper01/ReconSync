@@ -56,6 +56,9 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"RulesRoundTrip", testRulesRoundTrip},
 		{"RulesMatchAnyIsStoredAsNull", testRulesMatchAny},
 		{"RulesAreTenantScoped", testRulesTenantScoped},
+		{"IngestHealthRoundTrip", testIngestHealthRoundTrip},
+		{"IngestHealthAccumulates", testIngestHealthAccumulates},
+		{"ClaimExpiredRoutesGapToSuspect", testClaimExpiredGapToSuspect},
 		{"TenantIsolation", testTenantIsolation},
 	}
 
@@ -890,6 +893,115 @@ func testRulesTenantScoped(t *testing.T, s store.Store) {
 	}
 	if got, _ := s.ListRules(ctx, tenantA); len(got) != 1 {
 		t.Error("tenant B's delete removed tenant A's rule")
+	}
+}
+
+func testIngestHealthRoundTrip(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	bucket := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Minute)
+
+	if err := s.RecordIngestHealth(ctx, []store.IngestSample{
+		{TenantID: tenantA, Bucket: bucket, Received: 100},
+		{TenantID: tenantA, Bucket: bucket.Add(time.Minute), Received: 50, Dropped: 3},
+		{TenantID: tenantB, Bucket: bucket, Received: 7},
+	}); err != nil {
+		t.Fatalf("RecordIngestHealth: %v", err)
+	}
+
+	// The gap is in the second minute only.
+	clean, err := s.HasIngestGap(ctx, tenantA, bucket, bucket)
+	if err != nil {
+		t.Fatalf("HasIngestGap: %v", err)
+	}
+	if clean {
+		t.Error("reported a gap in a minute that lost nothing")
+	}
+
+	gap, err := s.HasIngestGap(ctx, tenantA, bucket, bucket.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("HasIngestGap: %v", err)
+	}
+	if !gap {
+		t.Error("missed a gap inside the range")
+	}
+
+	// Tenant B lost nothing, and must not inherit tenant A's gap.
+	otherGap, err := s.HasIngestGap(ctx, tenantB, bucket, bucket.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("HasIngestGap: %v", err)
+	}
+	if otherGap {
+		t.Error("tenant B inherited tenant A's gap")
+	}
+
+	act, err := s.IngestActivity(ctx, tenantA, bucket, bucket.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("IngestActivity: %v", err)
+	}
+	if act.Received != 150 {
+		t.Errorf("received = %d, want 150", act.Received)
+	}
+	if act.ActiveBuckets != 2 {
+		t.Errorf("active buckets = %d, want 2", act.ActiveBuckets)
+	}
+}
+
+// Samples carry deltas, so two flushes into the same minute must sum. Two
+// replicas writing concurrently depend on this.
+func testIngestHealthAccumulates(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	bucket := time.Now().UTC().Truncate(time.Minute)
+
+	for i := 0; i < 3; i++ {
+		if err := s.RecordIngestHealth(ctx, []store.IngestSample{
+			{TenantID: tenantA, Bucket: bucket, Received: 10, Dropped: 1},
+		}); err != nil {
+			t.Fatalf("RecordIngestHealth %d: %v", i, err)
+		}
+	}
+
+	act, err := s.IngestActivity(ctx, tenantA, bucket, bucket)
+	if err != nil {
+		t.Fatalf("IngestActivity: %v", err)
+	}
+	if act.Received != 30 {
+		t.Errorf("received = %d, want 30 — writes overwrote instead of accumulating", act.Received)
+	}
+}
+
+// The whole point of B1: a transaction whose window overlaps a hole in our own
+// view must not auto-reverse. This runs against both implementations because the
+// rule lives in SQL for Postgres and in Go for the fake.
+func testClaimExpiredGapToSuspect(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+
+	gapTxn := newExpiredTxn(tenantA, "TX-GAP", 5*time.Minute, time.Minute)
+	cleanTxn := newExpiredTxn(tenantA, "TX-CLEAN", 5*time.Minute, time.Minute)
+	mustUpsert(t, s, gapTxn, cleanTxn)
+
+	if err := s.RecordIngestHealth(ctx, []store.IngestSample{
+		{TenantID: tenantA, Bucket: gapTxn.DebitAt, Dropped: 1},
+	}); err != nil {
+		t.Fatalf("RecordIngestHealth: %v", err)
+	}
+
+	claimed, err := s.ClaimExpired(ctx, time.Now().UTC(), 100)
+	if err != nil {
+		t.Fatalf("ClaimExpired: %v", err)
+	}
+	if len(claimed) != 2 {
+		t.Fatalf("claimed %d, want 2", len(claimed))
+	}
+
+	// Both share the same window, so the gap covers both. What matters is that a
+	// gap produces suspect rather than orphaned.
+	for _, c := range claimed {
+		if c.Status != domain.StatusSuspect {
+			t.Errorf("%s = %s, want suspect — a gap covered its window", c.TransactionID, c.Status)
+		}
 	}
 }
 

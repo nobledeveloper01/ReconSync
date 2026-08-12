@@ -44,12 +44,28 @@ const (
 	DefaultFlushInterval = 200 * time.Millisecond
 )
 
+// Observer is told what happened to each tenant's events. All methods must be
+// cheap and safe to call concurrently — Accepted and Dropped run on the ingest
+// path. A nil Observer disables reporting.
+//
+// This exists so detection can later tell "no credit arrived" apart from "we
+// dropped it": the aggregate counters in Stats cannot, because they do not say
+// which tenant lost events or when.
+type Observer interface {
+	Accepted(tenantID string)
+	Dropped(tenantID string)
+	BatchFailed(tenantID string, events int)
+}
+
 // Config tunes the pipeline. Zero values take the defaults.
 type Config struct {
 	BufferSize    int
 	Workers       int
 	BatchSize     int
 	FlushInterval time.Duration
+
+	// Observer receives per-tenant outcomes. Optional.
+	Observer Observer
 }
 
 func (c *Config) setDefaults() {
@@ -142,9 +158,17 @@ func (p *Pipeline) Submit(ev domain.Event) error {
 	select {
 	case p.ingest <- ev:
 		p.received.Add(1)
+		if p.cfg.Observer != nil {
+			p.cfg.Observer.Accepted(ev.TenantID())
+		}
 		return nil
 	default:
 		p.dropped.Add(1)
+		if p.cfg.Observer != nil {
+			// Which tenant lost events, and when, is what makes a later
+			// reversal for that tenant untrustworthy.
+			p.cfg.Observer.Dropped(ev.TenantID())
+		}
 		return ErrBackpressure
 	}
 }
@@ -232,6 +256,11 @@ func (p *Pipeline) flush(ctx context.Context, batch []domain.Event) {
 		p.batches.Add(1)
 		if err := p.handler.Handle(ctx, tenantID, events); err != nil {
 			p.handlerErrors.Add(1)
+			if p.cfg.Observer != nil {
+				// These events never reached storage, so this tenant's view has
+				// a hole for as long as this batch covered.
+				p.cfg.Observer.BatchFailed(tenantID, len(events))
+			}
 			continue
 		}
 		p.flushed.Add(uint64(len(events)))

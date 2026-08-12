@@ -106,6 +106,10 @@ stateDiagram-v2
     reversal_completed --> [*]
 ```
 
+The `pending_debit -> suspect` edge is not in the original design. It is taken
+when **our own** ingest had a gap over that transaction's window — see
+"Knowing when we don't know" below.
+
 Two states carry most of the product's judgement:
 
 - **`suspect`** exists because a provider that answers ambiguously has not told
@@ -131,7 +135,10 @@ The state machine is written as **data, not control flow**:
 
 ```go
 var allowedTransitions = map[Status]map[Status]struct{}{
-    StatusPendingDebit: {StatusCompleted: {}, StatusPendingUnknown: {}, StatusOrphaned: {}},
+    StatusPendingDebit: {
+        StatusCompleted: {}, StatusPendingUnknown: {},
+        StatusOrphaned: {}, StatusSuspect: {},
+    },
     ...
 }
 ```
@@ -175,6 +182,29 @@ be revoked twice while Postgres guarded on `revoked_at IS NULL`.
 Two methods are deliberately *not* tenant-scoped, and both are documented as
 such: `ClaimExpired` (the detection sweep runs across all tenants) and
 `APIKeyByPrefix` (it is what resolves the tenant in the first place).
+
+### `internal/health` — knowing when we don't know
+
+Detection concludes that a transaction failed because no credit event arrived.
+That inference is only sound if we actually received everything the tenant sent.
+
+We don't always. The pipeline drops events under backpressure — deliberately,
+because blocking the caller is worse — and a batch can fail to apply. In both
+cases our view of that tenant has a hole, and the credit we never saw may have
+arrived perfectly well.
+
+So the pipeline reports per-tenant outcomes, a recorder accumulates them in
+memory and flushes per-minute counters to `ingest_health`, and the detection
+sweep checks — in the same statement that claims the transaction — whether any
+minute the window spans lost events. If one did, the transaction goes to
+`suspect` for a human instead of reversing (ADR-0004).
+
+Without this, a burst of backpressure silently becomes a burst of reversals.
+
+The check is deliberately conservative: we cannot know *which* events a drop
+destroyed, so any overlap makes the window unreliable. Some genuinely orphaned
+transactions will wait for a human. That is the right direction to be wrong in —
+a delayed reversal is a complaint, a wrong reversal is a double payment.
 
 ### `internal/pipeline` — bounded everything
 
@@ -542,6 +572,7 @@ internal/correlate/  matches credit legs to debits
 internal/pipeline/   bounded worker pool, batching, backpressure
 internal/auth/       API key issue and verification
 internal/ingest/     HTTP API, health, readiness, metrics
+internal/health/     records whether our own view of each tenant was intact
 internal/webhook/    payload signing, retry policy, SSRF-guarded client
 internal/service/    detection sweep and webhook dispatch loops
 migrations/          schema, applied forward and backward in tests
@@ -570,6 +601,7 @@ is delivered to the registered endpoint.
 | Webhook signing, retries, DLQ, SSRF guard | Done |
 | Server binary and admin CLI | Done |
 | `make demo` — one command to a verified webhook | Done |
+| Ingest-gap awareness — never reverse on our own blind spot | Done |
 | Docker Compose quickstart | **Not started** — needs a machine with Docker to verify |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |

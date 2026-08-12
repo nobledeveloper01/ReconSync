@@ -418,15 +418,29 @@ func (p *Postgres) ClaimExpired(ctx context.Context, now time.Time, limit int) (
 	if limit <= 0 {
 		limit = 500
 	}
+	// The gap check rides in the same statement as the claim, so a transaction
+	// cannot be claimed under one verdict and reclassified under another.
+	//
+	// A transaction only becomes orphaned if our own view of that tenant was
+	// intact across its whole window. If we dropped events or failed a batch in
+	// any minute it spans, the absence of a credit proves nothing and it goes to
+	// suspect for a human instead (ADR-0004).
 	rows, err := p.pool.Query(ctx, `
-		UPDATE transactions
-		SET status = CASE status
-		                WHEN 'pending_debit' THEN 'orphaned'
+		UPDATE transactions t
+		SET status = CASE
+		                WHEN EXISTS (
+		                    SELECT 1 FROM ingest_health h
+		                    WHERE h.tenant_id = t.tenant_id
+		                      AND h.bucket >= date_trunc('minute', t.debit_at)
+		                      AND h.bucket <= date_trunc('minute', t.expected_completion_at)
+		                      AND (h.dropped > 0 OR h.handler_errors > 0)
+		                ) THEN 'suspect'
+		                WHEN t.status = 'pending_debit' THEN 'orphaned'
 		                ELSE 'suspect'
 		             END,
 		    detected_at = $1,
 		    updated_at = $1
-		WHERE id IN (
+		WHERE t.id IN (
 			SELECT id FROM transactions
 			WHERE status IN ('pending_debit','pending_unknown')
 			  AND expected_completion_at <= $1

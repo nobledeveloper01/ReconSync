@@ -24,7 +24,9 @@ var allStatuses = []domain.Status{
 // edge. Asserting it exactly means an added transition fails the build — an
 // extra edge in a machine that decides whether to move money is a defect.
 var specEdges = map[domain.Status][]domain.Status{
-	domain.StatusPendingDebit:      {domain.StatusCompleted, domain.StatusPendingUnknown, domain.StatusOrphaned},
+	// StatusSuspect from pending_debit is ADR-0004: an ingest gap means the
+	// absence of a credit proves nothing, so it must not auto-reverse.
+	domain.StatusPendingDebit:      {domain.StatusCompleted, domain.StatusPendingUnknown, domain.StatusOrphaned, domain.StatusSuspect},
 	domain.StatusPendingUnknown:    {domain.StatusCompleted, domain.StatusSuspect},
 	domain.StatusSuspect:           {domain.StatusOrphaned, domain.StatusCompleted},
 	domain.StatusOrphaned:          {domain.StatusReversalPending},

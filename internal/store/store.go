@@ -192,6 +192,38 @@ type RuleStore interface {
 	DeleteRule(ctx context.Context, tenantID string, id int64) error
 }
 
+// IngestSample is one tenant's ingest counters for one minute.
+type IngestSample struct {
+	TenantID      string
+	Bucket        time.Time
+	Received      int64
+	Dropped       int64
+	HandlerErrors int64
+}
+
+// IngestActivitySummary describes what a tenant sent over a period.
+type IngestActivitySummary struct {
+	Received      int64
+	ActiveBuckets int // minutes in which at least one event arrived
+}
+
+// HealthStore records how intact our own view of each tenant's stream was.
+//
+// Detection infers failure from the absence of a credit event, which is only
+// sound if we received everything. This is what makes that assumption checkable.
+type HealthStore interface {
+	// RecordIngestHealth accumulates counters. Samples carry deltas, so repeated
+	// writes to the same minute sum rather than overwrite.
+	RecordIngestHealth(ctx context.Context, samples []IngestSample) error
+
+	// HasIngestGap reports whether anything was lost for this tenant across a
+	// time range.
+	HasIngestGap(ctx context.Context, tenantID string, from, to time.Time) (bool, error)
+
+	// IngestActivity summarises what a tenant sent, for the silence check.
+	IngestActivity(ctx context.Context, tenantID string, from, to time.Time) (IngestActivitySummary, error)
+}
+
 // Store is the full persistence surface.
 type Store interface {
 	TransactionStore
@@ -199,4 +231,5 @@ type Store interface {
 	APIKeyStore
 	WebhookStore
 	RuleStore
+	HealthStore
 }

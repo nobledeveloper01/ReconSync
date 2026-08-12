@@ -30,12 +30,14 @@ const (
 // Torn down in reverse order, then rebuilt, so each run starts from a known
 // schema regardless of what the previous one left behind.
 var migrationFiles = []string{
+	"0004_ingest_health.down.sql",
 	"0003_api_key_scopes.down.sql",
 	"0002_pending_credits.down.sql",
 	"0001_init.down.sql",
 	"0001_init.up.sql",
 	"0002_pending_credits.up.sql",
 	"0003_api_key_scopes.up.sql",
+	"0004_ingest_health.up.sql",
 }
 
 // testPool connects to the database named by RECONSYNC_TEST_DATABASE_URL and
@@ -76,7 +78,7 @@ func truncate(t *testing.T, pool *pgxpool.Pool) {
 	// audit_records is excluded: it is append-only and rejects TRUNCATE.
 	_, err := pool.Exec(context.Background(),
 		`TRUNCATE transactions, pending_credits, reconciliation_rules, webhook_deliveries,
-		 webhook_endpoints, api_keys, tenants RESTART IDENTITY CASCADE`)
+		 webhook_endpoints, api_keys, ingest_health, tenants RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
@@ -113,6 +115,19 @@ func newDebitTxn(tenantID, txnID string, window time.Duration) *domain.Transacti
 		CustomerRefHash:      "hash_9931",
 		Metadata:             map[string]any{"channel": "mobile"},
 	}
+}
+
+// newExpiredTxn builds a transaction whose window opened and closed in the past,
+// the way a real one does.
+//
+// newDebitTxn with a negative offset puts expected_completion_at *before*
+// debit_at, which never happens in production and inverts any range derived from
+// the window. Tests that care about the window itself need this instead.
+func newExpiredTxn(tenantID, txnID string, openedAgo, window time.Duration) *domain.Transaction {
+	t := newDebitTxn(tenantID, txnID, window)
+	t.DebitAt = time.Now().UTC().Add(-openedAgo).Truncate(time.Millisecond)
+	t.ExpectedCompletionAt = t.DebitAt.Add(window)
+	return t
 }
 
 func newCreditEvent(tenantID, txnID string, status domain.CreditStatus) *domain.CreditEvent {

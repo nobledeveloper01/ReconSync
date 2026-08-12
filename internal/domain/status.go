@@ -55,6 +55,10 @@ var allowedTransitions = map[Status]map[Status]struct{}{
 		StatusCompleted:      {},
 		StatusPendingUnknown: {},
 		StatusOrphaned:       {},
+		// Not in the §4.2 diagram. Reached when our own ingest had a gap over
+		// this transaction's window, so the absence of a credit proves nothing.
+		// See ADR-0004.
+		StatusSuspect: {},
 	},
 	StatusPendingUnknown: {
 		StatusCompleted: {},

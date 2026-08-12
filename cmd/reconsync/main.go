@@ -20,6 +20,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/correlate"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/health"
 	"github.com/nobledeveloper01/ReconSync/internal/ingest"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
@@ -132,6 +133,13 @@ func run() error {
 		return err
 	}
 
+	// Records what we dropped, per tenant per minute, so the detection sweep can
+	// tell "no credit arrived" apart from "we never saw it" (ADR-0004).
+	healthRecorder, err := health.New(db, health.Options{Logger: log})
+	if err != nil {
+		return err
+	}
+
 	pipe, err := pipeline.New(pipeline.HandlerFunc(
 		func(ctx context.Context, tenantID string, events []domain.Event) error {
 			res, err := engine.Apply(ctx, tenantID, events)
@@ -145,7 +153,7 @@ func run() error {
 					slog.String("error", rej.Err.Error()))
 			}
 			return nil
-		}), pipeline.Config{})
+		}), pipeline.Config{Observer: healthRecorder})
 	if err != nil {
 		return err
 	}
@@ -199,9 +207,10 @@ func run() error {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); detector.Run(ctx) }()
 	go func() { defer wg.Done(); dispatcher.Run(ctx) }()
+	go func() { defer wg.Done(); healthRecorder.Run(ctx) }()
 
 	serveErr := make(chan error, 1)
 	go func() {
