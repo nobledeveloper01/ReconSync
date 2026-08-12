@@ -50,6 +50,10 @@ type Options struct {
 	Store store.TransactionStore
 	Auth  *auth.Authenticator
 
+	// Audit backs GET /v1/audit/verify. Optional: without it the endpoint
+	// reports that verification is unavailable rather than pretending to pass.
+	Audit store.AuditStore
+
 	// Ready reports dependency health for /readyz. Liveness never calls it.
 	Ready func(ctx context.Context) error
 
@@ -67,6 +71,7 @@ type Server struct {
 	sink    EventSink
 	rules   RuleProvider
 	store   store.TransactionStore
+	audit   store.AuditStore
 	auth    *auth.Authenticator
 	ready   func(ctx context.Context) error
 	log     *slog.Logger
@@ -95,6 +100,7 @@ func New(opts Options) (*Server, error) {
 		sink:        opts.Sink,
 		rules:       opts.Rules,
 		store:       opts.Store,
+		audit:       opts.Audit,
 		auth:        opts.Auth,
 		ready:       opts.Ready,
 		log:         opts.Logger,
@@ -136,6 +142,7 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("POST /v1/events/reversal-completed", s.handleReversalCompleted)
 	api.HandleFunc("GET /v1/transactions", s.handleListTransactions)
 	api.HandleFunc("GET /v1/transactions/{transaction_id}", s.handleGetTransaction)
+	api.HandleFunc("GET /v1/audit/verify", s.handleAuditVerify)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", s.authenticate(api))

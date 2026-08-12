@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nobledeveloper01/ReconSync/internal/audit"
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
@@ -40,6 +41,9 @@ type Memory struct {
 	// ingest counters by tenant and minute
 	health map[healthKey]IngestSample
 
+	// per-tenant audit chain, in sequence order
+	audit map[string][]audit.Record
+
 	nextID         int64
 	nextDeliveryID int64
 	nextRuleID     int64
@@ -59,6 +63,7 @@ func NewMemory() *Memory {
 		payloads:   make(map[int64][]byte),
 		rules:      make(map[string][]rules.Rule),
 		health:     make(map[healthKey]IngestSample),
+		audit:      make(map[string][]audit.Record),
 	}
 }
 

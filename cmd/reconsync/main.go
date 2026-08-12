@@ -174,6 +174,7 @@ func run() error {
 		Sink:   pipe,
 		Rules:  ruleProvider,
 		Store:  db,
+		Audit:  db,
 		Auth:   authenticator,
 		Logger: log,
 		Ready:  func(ctx context.Context) error { return pool.Ping(ctx) },

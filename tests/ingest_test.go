@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nobledeveloper01/ReconSync/internal/audit"
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/correlate"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
@@ -109,6 +110,7 @@ func newIngestFixture(t *testing.T, opts fixtureOpts) *ingestFixture {
 		Sink:  p,
 		Rules: ruleProvider,
 		Store: s,
+		Audit: s,
 		Auth:  authenticator,
 		Ready: opts.ready,
 	})
@@ -658,6 +660,57 @@ func TestIngestMetrics(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("metrics output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// The customer runs this themselves, and it recomputes every hash rather than
+// trusting anything we previously claimed.
+func TestIngestAuditVerify(t *testing.T) {
+	f := newIngestFixture(t, fixtureOpts{})
+	ctx := context.Background()
+
+	// An empty chain verifies trivially, which is honest: nothing to falsify.
+	w := f.do(t, http.MethodGet, "/v1/audit/verify", f.keyA, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if body := decodeBody(t, w); body["verified"] != true {
+		t.Errorf("empty chain reported unverified: %v", body)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := f.store.AppendAudit(ctx, tenantA, &audit.Record{
+			EventType: audit.EventDetected,
+			Subject:   map[string]any{"type": "transaction", "id": "TX-1"},
+			Payload:   map[string]any{"verdict": "orphaned"},
+		}); err != nil {
+			t.Fatalf("AppendAudit: %v", err)
+		}
+	}
+
+	w = f.do(t, http.MethodGet, "/v1/audit/verify", f.keyA, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := decodeBody(t, w)
+	if body["verified"] != true {
+		t.Errorf("intact chain reported unverified: %v", body)
+	}
+	if body["records"] != float64(3) {
+		t.Errorf("records = %v, want 3", body["records"])
+	}
+
+	// Tenant B has its own chain and cannot see tenant A's records.
+	w = f.do(t, http.MethodGet, "/v1/audit/verify", f.keyB, nil)
+	if body := decodeBody(t, w); body["records"] != float64(0) {
+		t.Errorf("tenant B saw %v records of tenant A's chain", body["records"])
+	}
+
+	if w := f.do(t, http.MethodGet, "/v1/audit/verify", "", nil); w.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated verify = %d, want 401", w.Code)
+	}
+	if w := f.do(t, http.MethodGet, "/v1/audit/verify?limit=0", f.keyA, nil); w.Code != http.StatusBadRequest {
+		t.Errorf("limit=0 = %d, want 400", w.Code)
 	}
 }
 

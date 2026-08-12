@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/nobledeveloper01/ReconSync/internal/audit"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/evidence"
 	"github.com/nobledeveloper01/ReconSync/internal/provider"
@@ -210,6 +211,8 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 			endpoints[txn.TenantID] = eps
 		}
 
+		d.recordVerdict(ctx, txn, event, ev)
+
 		queued, err := d.queue(ctx, txn, event, eps, ev)
 		if err != nil {
 			return res, err
@@ -313,6 +316,45 @@ func (d *Detector) corroborate(ctx context.Context, txn *domain.Transaction, now
 			evidence.WeightProviderNotFound)
 		res.Corroborated++
 		return false, nil
+	}
+}
+
+// recordVerdict writes the decision and its evidence to the tenant's audit
+// chain, so "why did you reverse this" is answerable months later.
+//
+// A failed append is logged, never fatal. Losing an audit record is bad; refusing
+// to reverse a transaction because we could not write one would leave a customer
+// out of pocket, which is worse. The alert is the mitigation.
+func (d *Detector) recordVerdict(ctx context.Context, txn *domain.Transaction, event webhook.EventType, ev *evidence.Set) {
+	signals := make([]map[string]any, 0, len(ev.Signals()))
+	for _, s := range ev.Signals() {
+		signals = append(signals, map[string]any{
+			"signal": s.Name,
+			"value":  s.Value,
+			"weight": s.Weight,
+		})
+	}
+
+	_, err := d.store.AppendAudit(ctx, txn.TenantID, &audit.Record{
+		EventType:  audit.EventDetected,
+		OccurredAt: d.now().UTC(),
+		Actor:      map[string]any{"type": "system", "id": "detection-sweep"},
+		Subject:    map[string]any{"type": "transaction", "id": txn.TransactionID},
+		Payload: map[string]any{
+			"verdict":        string(txn.Status),
+			"event":          string(event),
+			"confidence":     ev.Confidence(),
+			"evidence":       signals,
+			"amount_minor":   txn.AmountMinor,
+			"currency":       txn.Currency,
+			"window_seconds": int(txn.Window() / time.Second),
+		},
+	})
+	if err != nil {
+		d.log.ErrorContext(ctx, "could not record the verdict on the audit chain",
+			slog.String("tenant_id", txn.TenantID),
+			slog.String("transaction_id", txn.TransactionID),
+			slog.String("error", err.Error()))
 	}
 }
 

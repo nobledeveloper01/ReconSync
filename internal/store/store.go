@@ -10,6 +10,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/nobledeveloper01/ReconSync/internal/audit"
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
@@ -276,6 +277,15 @@ type SilenceParams struct {
 	MinActiveBuckets int
 }
 
+// AuditStore appends to and reads the per-tenant hash chain.
+type AuditStore interface {
+	// AppendAudit links a record to the tenant's chain and stores it.
+	AppendAudit(ctx context.Context, tenantID string, r *audit.Record) (*audit.Record, error)
+
+	// ListAudit returns the chain in sequence order.
+	ListAudit(ctx context.Context, tenantID string, limit int) ([]audit.Record, error)
+}
+
 // Store is the full persistence surface.
 type Store interface {
 	TransactionStore
@@ -284,4 +294,5 @@ type Store interface {
 	WebhookStore
 	RuleStore
 	HealthStore
+	AuditStore
 }

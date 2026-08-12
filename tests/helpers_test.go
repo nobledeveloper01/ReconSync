@@ -2,8 +2,10 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +32,7 @@ const (
 // Torn down in reverse order, then rebuilt, so each run starts from a known
 // schema regardless of what the previous one left behind.
 var migrationFiles = []string{
+	"0005_audit_chain.down.sql",
 	"0004_ingest_health.down.sql",
 	"0003_api_key_scopes.down.sql",
 	"0002_pending_credits.down.sql",
@@ -38,6 +41,7 @@ var migrationFiles = []string{
 	"0002_pending_credits.up.sql",
 	"0003_api_key_scopes.up.sql",
 	"0004_ingest_health.up.sql",
+	"0005_audit_chain.up.sql",
 }
 
 // testPool connects to the database named by RECONSYNC_TEST_DATABASE_URL and
@@ -82,6 +86,23 @@ func truncate(t *testing.T, pool *pgxpool.Pool) {
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
+}
+
+// auditTenantSeq gives each audit test its own tenant.
+//
+// audit_records has no foreign key to tenants — an audit trail must outlive the
+// thing it describes — so TRUNCATE CASCADE does not clear it, and the
+// immutability trigger blocks deleting it directly. A shared tenant id would
+// therefore inherit the previous test's chain.
+var auditTenantSeq atomic.Int64
+
+func uniqueTenant(t *testing.T, s store.Store) string {
+	t.Helper()
+	id := fmt.Sprintf("tnt_audit_%d", auditTenantSeq.Add(1))
+	if err := s.EnsureTenant(context.Background(), id, id, "test"); err != nil {
+		t.Fatalf("EnsureTenant(%s): %v", id, err)
+	}
+	return id
 }
 
 func seedTenants(t *testing.T, s store.Store, ids ...string) {

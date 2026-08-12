@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nobledeveloper01/ReconSync/internal/audit"
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
@@ -339,6 +340,49 @@ func (s *Server) handleListTransactions(w http.ResponseWriter, r *http.Request) 
 		views = append(views, viewOf(t))
 	}
 	s.writeJSON(w, r, http.StatusOK, map[string]any{"transactions": views})
+}
+
+// handleAuditVerify walks the tenant's chain and reports whether it is intact.
+//
+// The customer runs this themselves, and it recomputes every hash from the
+// stored content rather than trusting anything we previously wrote. A pass means
+// no record was altered, replaced or removed since it was written.
+func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if s.audit == nil {
+		// Saying "unavailable" beats returning a pass this build cannot support.
+		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
+			"audit verification is not configured on this deployment", "")
+		return
+	}
+
+	limit := 10000
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 || n > 100000 {
+			s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+				"limit must be between 1 and 100000", "limit")
+			return
+		}
+		limit = n
+	}
+
+	records, err := s.audit.ListAudit(r.Context(), principal.TenantID, limit)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	result := audit.VerifyChain(principal.TenantID, records)
+
+	// A broken chain is a successful verification that found tampering, not a
+	// failed request — 200 with verified:false. A 5xx would suggest our bug and
+	// send the operator looking in the wrong place.
+	s.writeJSON(w, r, http.StatusOK, result)
 }
 
 // handleHealthz reports process liveness only. It must never consult the

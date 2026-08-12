@@ -326,6 +326,41 @@ receiver tell "we tried and failed" apart from "we never asked".
 It is a clamped sum, not a probability. Inventing a statistical model over
 signals we have not calibrated would dress a guess up as a measurement.
 
+### `internal/audit` — proving nothing was rewritten
+
+The immutability triggers stop a row being edited or removed. They do not prove
+nothing was **replaced** — anyone who can disable a trigger can rewrite history
+and leave no trace.
+
+So every record is chained to the one before it: its hash covers its own content
+plus the previous record's hash. Alter a record and its hash stops matching.
+Swap one in and its `prev_hash` stops matching. Remove one and the gapless `seq`
+exposes the hole. Each of those is a different attack and all three are checked.
+
+`GET /v1/audit/verify` recomputes the whole chain from stored content and reports
+the first break with a reason:
+
+```json
+{ "tenant_id": "tnt_acme", "records": 3, "verified": false, "broken_at": 2,
+  "reason": "recorded hash does not match the record's content; it was altered" }
+```
+
+That output is from an actual test: a superuser disabled the trigger and rewrote
+a verdict from `orphaned` to `completed`. The chain caught it and named the
+record.
+
+A broken chain returns **200 with `verified: false`**, not a 5xx. Verification
+succeeded; what it found was tampering. A 500 would send the operator looking for
+our bug instead of their intruder.
+
+Appends are serialised per tenant with an advisory lock rather than raced
+optimistically (ADR-0007). A chain cannot be built in parallel, and optimistic
+retry turns a guaranteed short wait into a probabilistic dropped record — which
+first showed up as a real test failure at eight concurrent writers.
+
+The detection sweep writes each verdict here with its full evidence, so **"why
+did you reverse this six months ago"** is answerable from the database.
+
 ### `internal/pipeline` — bounded everything
 
 The §4.3 worker pool. Its whole job is to absorb load without ever blocking the
@@ -550,6 +585,7 @@ without knowing our rules — it removes a whole category of integration questio
 | POST | `/v1/events/reversal-completed` | Confirm a reversal; returns detection-to-confirmation elapsed time. |
 | GET | `/v1/transactions/{id}` | One transaction. |
 | GET | `/v1/transactions?status=&limit=` | List by state. |
+| GET | `/v1/audit/verify` | Recompute the tenant's audit chain and report any tampering. |
 | GET | `/healthz` `/readyz` `/metrics` | Liveness, readiness, Prometheus metrics. |
 
 Ingest is asynchronous, so both event endpoints return `202 Accepted` rather
@@ -702,6 +738,7 @@ internal/correlate/  matches credit legs to debits
 internal/pipeline/   bounded worker pool, batching, backpressure
 internal/auth/       API key issue and verification
 internal/ingest/     HTTP API, health, readiness, metrics
+internal/audit/      the verifiable hash chain
 internal/evidence/   what a verdict rests on, and how sure we are
 internal/health/     records whether our own view of each tenant was intact
 internal/provider/   asks the rail what actually happened, instead of guessing
@@ -736,7 +773,9 @@ is delivered to the registered endpoint.
 | Ingest-gap awareness — never reverse on our own blind spot | Done |
 | Silence suppression — never mass-reverse during a tenant outage | Done |
 | Provider corroboration — ask the rail instead of inferring from silence | Done |
-| Confidence score + evidence trail on every verdict | Done, published but not yet persisted |
+| Confidence score + evidence trail on every verdict | Done |
+| Audit hash chain + `GET /v1/audit/verify` | Done |
+| Signed chain checkpoints published externally | **Not started** |
 | Docker Compose quickstart | **Not started** — needs a machine with Docker to verify |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |

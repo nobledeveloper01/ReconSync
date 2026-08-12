@@ -65,6 +65,9 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"LowVolumeTenantIsNotSilent", testLowVolumeTenantIsNotSilent},
 		{"SilenceCheckDisabled", testSilenceCheckDisabled},
 		{"ClaimExpiredSkipsTenants", testClaimExpiredSkipsTenants},
+		{"AuditChainAppend", testAuditChainAppend},
+		{"AuditRoundTripsContent", testAuditRoundTripsContent},
+		{"AuditChainsAreTenantScoped", testAuditChainsAreTenantScoped},
 		{"TenantIsolation", testTenantIsolation},
 	}
 
@@ -1109,16 +1112,19 @@ func TestAuditRecordsAreAppendOnly(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 
+	// Raw insert rather than AppendAudit: this test is about the database
+	// enforcing immutability, not about the chain being well formed.
 	_, err := pool.Exec(ctx,
-		`INSERT INTO audit_records (tenant_id, event_type, occurred_at, hash)
-		 VALUES ('tnt_audit', 'reversal.triggered', now(), 'sha256:seed')`)
+		`INSERT INTO audit_records (tenant_id, seq, event_type, occurred_at, hash)
+		 VALUES ('tnt_immutable', 1, 'reversal.triggered', now(), 'sha256:seed')
+		 ON CONFLICT (tenant_id, seq) DO NOTHING`)
 	if err != nil {
 		t.Fatalf("insert audit record: %v", err)
 	}
 
 	for _, tc := range []struct{ name, sql string }{
-		{"update", `UPDATE audit_records SET hash = 'tampered' WHERE tenant_id = 'tnt_audit'`},
-		{"delete", `DELETE FROM audit_records WHERE tenant_id = 'tnt_audit'`},
+		{"update", `UPDATE audit_records SET hash = 'tampered' WHERE tenant_id = 'tnt_immutable'`},
+		{"delete", `DELETE FROM audit_records WHERE tenant_id = 'tnt_immutable'`},
 		{"truncate", `TRUNCATE audit_records`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
