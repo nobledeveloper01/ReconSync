@@ -26,6 +26,8 @@ func endpointsCreate(ctx context.Context, args []string) error {
 	events := fs.String("events", "", "comma-separated event types (empty means all)")
 	secretRef := fs.String("secret-ref", "env://RECONSYNC_WEBHOOK_SECRET", "reference to the signing secret")
 	allowPrivate := fs.Bool("allow-private", false, allowPrivateUsage)
+	allowInsecure := fs.Bool("allow-insecure", false,
+		"permit an http endpoint. Local development only: plaintext puts every payload on the wire")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -39,9 +41,16 @@ func endpointsCreate(ctx context.Context, args []string) error {
 	// Rejected here as well as at delivery time. Catching it now means the
 	// operator finds out while typing the command, not from a dead-letter queue
 	// six hours later.
-	if err := webhook.ValidateEndpointURL(*url, *allowPrivate); err != nil {
+	var opts []webhook.URLOption
+	if *allowInsecure {
+		opts = append(opts, webhook.AllowInsecureScheme())
+	}
+	if err := webhook.ValidateEndpointURL(*url, *allowPrivate, opts...); err != nil {
 		if errors.Is(err, webhook.ErrPrivateAddress) && !*allowPrivate {
 			return fmt.Errorf("%w — pass --allow-private only for local development", err)
+		}
+		if errors.Is(err, webhook.ErrInsecureScheme) && !*allowInsecure {
+			return fmt.Errorf("%w — pass --allow-insecure only for local development", err)
 		}
 		return err
 	}
@@ -133,6 +142,8 @@ func endpointsTest(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("endpoints test", flag.ContinueOnError)
 	tenant := fs.String("tenant", "", "tenant id")
 	id := fs.String("id", "", "endpoint id")
+	// No --allow-insecure here: the scheme was decided when the endpoint was
+	// registered, and offering a flag that changes nothing would be a lie.
 	allowPrivate := fs.Bool("allow-private", false, allowPrivateUsage)
 	if err := fs.Parse(args); err != nil {
 		return err

@@ -431,6 +431,22 @@ The signature is only worth what its publication is worth. A checkpoint archived
 solely in the database an attacker controls is a row they can delete; the
 endpoint that lists them says so.
 
+#### Hashes are computed at storage precision
+
+Both the record hash and the checkpoint signature normalise their timestamp to
+**microseconds**, which is what Postgres `timestamptz` holds. Hashing the
+nanoseconds a Go clock happens to provide produces a hash that stops matching the
+moment the record is read back, because storage rounded them away.
+
+This was a live bug, and the way it hid is worth recording: a macOS clock
+usually returns microsecond-granular times, so it never reproduced in
+development. Linux returns real nanoseconds, so **every audit record the service
+wrote in a container failed its own verification** — the whole compliance
+guarantee, silently void in exactly the environment it ships to. Every test used
+a hand-written timestamp ending in zeros, so CI passed too. It surfaced the first
+time the stack ran under Docker, and the regression tests now use nanosecond
+timestamps on purpose.
+
 Appends are serialised per tenant with an advisory lock rather than raced
 optimistically (ADR-0007). A chain cannot be built in parallel, and optimistic
 retry turns a guaranteed short wait into a probabilistic dropped record — which
@@ -711,6 +727,46 @@ and prints the signed reversal webhook that arrives for the orphan, with its
 signature verified. Everything is torn down afterwards, including the database.
 
 Needs Go and a running Postgres. Nothing else, and it touches no real data.
+
+### Or with Docker
+
+```bash
+docker compose up --build
+```
+
+ReconSync, Postgres and the reference receiver, on `127.0.0.1:8080`. Then:
+
+```bash
+docker compose exec app reconsyncctl tenant create --id tnt_demo --env test
+docker compose exec app reconsyncctl keys create --tenant tnt_demo --env test
+docker compose exec app reconsyncctl endpoints create --tenant tnt_demo --id we_demo \
+    --url http://echo:8411/hook --allow-private --allow-insecure
+docker compose exec app reconsyncctl rules create --tenant tnt_demo --type transfer --window 5
+```
+
+Post a debit with no matching credit and watch `docker compose logs -f echo` print
+the signed reversal, signature verified.
+
+Four things about the setup are deliberate:
+
+- **Migrations are their own service**, not part of the app's startup. Two
+  replicas starting together would otherwise race the same DDL, and the failure
+  would look like a crashloop rather than what it is.
+- **`reconsyncctl migrate up` keeps a ledger**, so `docker compose up` a second
+  time is a no-op. A loop over the `.sql` files works exactly once and fails on
+  the next start — which is how this was found.
+- **The runtime image is distroless.** Nothing here needs a shell, and a service
+  holding an audit chain is not where to leave one for whoever gets in. That is
+  why the health check is `reconsyncctl probe`: there is no curl to call, and
+  "the process is running" stays green through a wedged server.
+- **`--allow-insecure` is separate from `--allow-private`.** A private-address
+  endpoint over TLS is a normal internal deployment; a public endpoint over
+  plaintext exposes every payload. One flag for both would mean granting the
+  second to get the first. Both are development-only.
+
+The secrets in `compose.yaml` are fixed and worthless on purpose — it is a
+try-it-out file, and generating them would put them somewhere a reader has to go
+looking.
 
 ### Set it up properly
 
@@ -1012,7 +1068,8 @@ internal/report/     the reversal SLA compliance report
 internal/drill/      exercises the reversal path on demand
 internal/webhook/    payload signing, retry policy, SSRF-guarded client
 internal/service/    detection sweep and webhook dispatch loops
-migrations/          schema, applied forward and backward in tests
+migrations/          schema, embedded in the binary and applied by a ledger
+internal/migrate/    the migration runner: once each, in order, idempotent
 tests/               the whole suite, exercising only the exported API
 ```
 
@@ -1050,7 +1107,7 @@ is delivered to the registered endpoint.
 | Audit hash chain + `GET /v1/audit/verify` | Done |
 | Reversal SLA compliance report (JSON + CSV) | Done |
 | Signed chain checkpoints (Ed25519, `GET /v1/audit/checkpoints`) | Done |
-| Docker Compose quickstart | **Not started** — needs a machine with Docker to verify |
+| Docker Compose quickstart | Done — verified end to end on Docker 29.5 |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |
 | PDF report export | **Not started** — JSON and CSV only |

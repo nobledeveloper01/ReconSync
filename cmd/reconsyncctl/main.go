@@ -28,9 +28,14 @@ const usage = `reconsyncctl — ReconSync admin CLI
 
 Usage:
   reconsyncctl doctor                          check the deployment is sound
+  reconsyncctl probe --url URL                 exit 0 if an endpoint is healthy
+  reconsyncctl migrate up                      apply pending migrations
+  reconsyncctl migrate status                  what has run, what has not
+  reconsyncctl migrate baseline                mark all applied, for an existing database
   reconsyncctl tenant create --id ID [--name N] [--env test|live]
   reconsyncctl keys create --tenant ID [--env test|live]
   reconsyncctl endpoints create --tenant ID --url URL [--events a,b]
+                               [--allow-private] [--allow-insecure]  (dev only)
   reconsyncctl endpoints list --tenant ID
   reconsyncctl endpoints test --tenant ID --id ENDPOINT_ID
   reconsyncctl rules create --tenant ID --window SECONDS [--type T] [--provider P]
@@ -62,6 +67,16 @@ func run(args []string) error {
 
 	case "doctor":
 		return doctor(ctx)
+
+	case "probe":
+		return probe(ctx, args[1:])
+
+	case "migrate":
+		return dispatch(ctx, "migrate", args[1:], map[string]subcommand{
+			"up":       migrateUp,
+			"status":   migrateStatus,
+			"baseline": migrateBaseline,
+		})
 
 	case "tenant":
 		return dispatch(ctx, "tenant", args[1:], map[string]subcommand{
@@ -148,8 +163,12 @@ func doctor(ctx context.Context) error {
 	}
 	fmt.Println("✓ database reachable")
 
+	// Every table the application writes to. A doctor that only knows half the
+	// schema reports health it has not checked, which is worse than not
+	// checking: an operator stops looking.
 	tables := []string{"tenants", "api_keys", "transactions", "pending_credits",
-		"reconciliation_rules", "webhook_endpoints", "webhook_deliveries", "audit_records"}
+		"reconciliation_rules", "webhook_endpoints", "webhook_deliveries", "audit_records",
+		"ingest_health", "tenant_silence", "reversal_claims", "audit_checkpoints"}
 	for _, table := range tables {
 		var exists bool
 		err := pool.QueryRow(ctx,

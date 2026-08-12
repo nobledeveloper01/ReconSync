@@ -228,6 +228,34 @@ func TestValidateEndpointURL(t *testing.T) {
 	}
 }
 
+// The two relaxations are separate flags because they relax different things:
+// granting one must not grant the other.
+func TestInsecureSchemeIsItsOwnRelaxation(t *testing.T) {
+	const httpEndpoint = "http://echo.internal:8411/hook"
+
+	if err := webhook.ValidateEndpointURL(httpEndpoint, false); !errors.Is(err, webhook.ErrInsecureScheme) {
+		t.Errorf("plaintext = %v, want ErrInsecureScheme", err)
+	}
+	// Allowing a private address must not quietly allow plaintext too.
+	if err := webhook.ValidateEndpointURL(httpEndpoint, true); !errors.Is(err, webhook.ErrInsecureScheme) {
+		t.Errorf("--allow-private also allowed http: %v", err)
+	}
+	// And allowing plaintext must not allow a private address.
+	if err := webhook.ValidateEndpointURL("http://127.0.0.1/hook", false,
+		webhook.AllowInsecureScheme()); !errors.Is(err, webhook.ErrPrivateAddress) {
+		t.Errorf("--allow-insecure also allowed a private address: %v", err)
+	}
+	// Both, which is what the Compose quickstart needs.
+	if err := webhook.ValidateEndpointURL(httpEndpoint, true, webhook.AllowInsecureScheme()); err != nil {
+		t.Errorf("both relaxations still rejected the endpoint: %v", err)
+	}
+	// A scheme that is neither is refused whatever the flags say.
+	if err := webhook.ValidateEndpointURL("ftp://example.com/hook", true,
+		webhook.AllowInsecureScheme()); !errors.Is(err, webhook.ErrInsecureScheme) {
+		t.Errorf("ftp:// was accepted: %v", err)
+	}
+}
+
 // Registration-time validation cannot stop a hostname being re-pointed at an
 // internal address later, so the guard has to run at dial time too.
 func TestClientBlocksPrivateAddressesAtDialTime(t *testing.T) {

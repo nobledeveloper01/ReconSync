@@ -1,0 +1,103 @@
+# ReconSync, Postgres and a reference webhook receiver, in one command.
+#
+#   docker compose up --build
+#
+# The secrets below are fixed and worthless on purpose: this file is for trying
+# the product out, and generating them would mean printing them somewhere a
+# reader has to go looking. Every one of them is refused in production by the
+# checks in §7 — see the warning on `app`.
+
+name: reconsync
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: reconsync
+      POSTGRES_PASSWORD: reconsync
+      POSTGRES_DB: reconsync
+    # Named volume rather than a bind mount: a quickstart that scatters files
+    # into the working directory is one people are reluctant to run twice.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -U and -d matter: the default checks the postgres user against the
+      # postgres database, neither of which exists here, so it would report
+      # healthy against a server that cannot serve this application.
+      test: ["CMD-SHELL", "pg_isready -U reconsync -d reconsync"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:5433:5432" # 5433 so it cannot collide with a local Postgres
+
+  # Migrations run as their own service rather than inside the app's entrypoint.
+  # Two app replicas starting together would otherwise race the same DDL, and
+  # the failure would look like a crashloop rather than what it is.
+  migrate:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      RECONSYNC_DATABASE_URL: postgres://reconsync:reconsync@db:5432/reconsync?sslmode=disable
+    # The runner keeps a ledger, so this is safe to run on every `up`. A loop
+    # over the .sql files would work exactly once and fail on the next start.
+    entrypoint: ["/usr/local/bin/reconsyncctl"]
+    command: ["migrate", "up"]
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      RECONSYNC_DATABASE_URL: postgres://reconsync:reconsync@db:5432/reconsync?sslmode=disable
+      RECONSYNC_ADDR: ":8080"
+
+      # Development values. In production these come from a secret manager: a
+      # predictable salt pseudonymises every customer reference identically,
+      # and a shared webhook secret lets anyone forge a reversal.
+      RECONSYNC_TENANT_SALT: compose-salt-not-for-production
+      RECONSYNC_WEBHOOK_SECRET: whsec_compose_not_for_production
+
+      # The echo receiver is on a private network address, which the SSRF guard
+      # refuses by design. Never set this outside local development.
+      RECONSYNC_ALLOW_PRIVATE_WEBHOOK_TARGETS: "true"
+
+      # Two seconds so a checkpoint appears while you are still watching. The
+      # default is an hour; the interval is the window a rewrite could hide in.
+      RECONSYNC_CHECKPOINT_KEY: 9d1f0e5c7a3b2846d5e9f0c1a2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5
+      RECONSYNC_CHECKPOINT_INTERVAL_SECONDS: "2"
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      # The image is distroless: no shell, no curl. reconsyncctl probe is what
+      # checks the server itself — "the process is running" stays green through
+      # a wedged one, which is the failure a health check exists to catch.
+      test: ["CMD", "/usr/local/bin/reconsyncctl", "probe", "--url", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  # The reference receiver: verifies every signature before trusting a payload,
+  # and refuses fire drills. Read cmd/reconsync-echo/main.go — it is the worked
+  # example of what your own handler has to do.
+  echo:
+    build:
+      context: .
+      dockerfile: Dockerfile.echo
+    environment:
+      ECHO_ADDR: "0.0.0.0:8411"
+      RECONSYNC_WEBHOOK_SECRET: whsec_compose_not_for_production
+    # Not published. Nothing outside the network needs to reach it — you read
+    # what it received with `docker compose logs echo` — and publishing it would
+    # collide with `make demo`, which uses the same port on the host.
+    expose:
+      - "8411"
+
+volumes:
+  pgdata:

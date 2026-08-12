@@ -1,0 +1,11 @@
+# Keep the build context to what the build actually needs: a large context is
+# copied on every build, and docs/ is gitignored anyway.
+.git
+.github
+docs
+bin
+*.md
+!README.md
+compose.yaml
+Dockerfile*
+.dockerignore

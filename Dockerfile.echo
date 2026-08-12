@@ -1,0 +1,17 @@
+# The reference webhook receiver, for the Compose quickstart.
+#
+# Separate from the main Dockerfile so the production image never ships a
+# service whose whole job is to accept unauthenticated POSTs.
+FROM golang:1.25-alpine AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/reconsync-echo ./cmd/reconsync-echo
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/reconsync-echo /usr/local/bin/reconsync-echo
+USER nonroot:nonroot
+EXPOSE 8411
+ENTRYPOINT ["/usr/local/bin/reconsync-echo"]

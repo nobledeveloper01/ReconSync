@@ -19,17 +19,42 @@ var (
 	ErrPrivateAddress = errors.New("webhook: endpoint resolves to a non-public address")
 )
 
+// URLOption relaxes endpoint validation. Each one is a development affordance
+// and none has a place in production.
+type URLOption func(*urlConfig)
+
+type urlConfig struct {
+	allowInsecure bool
+}
+
+// AllowInsecureScheme permits http. Local development only: a plaintext webhook
+// puts the payload, and everything a signature is meant to protect, on the wire
+// for anyone on the path.
+func AllowInsecureScheme() URLOption {
+	return func(c *urlConfig) { c.allowInsecure = true }
+}
+
 // ValidateEndpointURL checks an endpoint at registration time.
 //
 // This is only the first half of the defence. A host that passes here can be
 // re-pointed at an internal address later, so the dial-time check in
 // NewTransport is what actually stops DNS rebinding (§10).
-func ValidateEndpointURL(raw string, allowPrivate bool) error {
+//
+// The two relaxations are separate flags because they relax different things. A
+// private-address endpoint over TLS is a normal internal deployment; a public
+// endpoint over plaintext exposes every payload to the network path. Folding
+// them into one switch would mean granting the second to get the first.
+func ValidateEndpointURL(raw string, allowPrivate bool, opts ...URLOption) error {
+	var cfg urlConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("webhook: invalid endpoint url: %w", err)
 	}
-	if u.Scheme != "https" {
+	if u.Scheme != "https" && (!cfg.allowInsecure || u.Scheme != "http") {
 		return ErrInsecureScheme
 	}
 	if u.Host == "" {

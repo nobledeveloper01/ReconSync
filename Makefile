@@ -1,4 +1,4 @@
-.PHONY: help build test test-integration race lint vet fmt tidy db-setup db-drop migrate-up migrate-down ci
+.PHONY: help build test test-integration race lint vet fmt tidy db-setup db-drop migrate-up migrate-status migrate-down ci
 
 TEST_DB      ?= reconsync_test
 TEST_DB_URL  ?= postgres://localhost:5432/$(TEST_DB)?sslmode=disable
@@ -62,16 +62,19 @@ db-setup: ## Create the local test database
 db-drop: ## Drop the local test database
 	@dropdb --if-exists $(TEST_DB)
 
-migrate-up: ## Apply every migration to TEST_DB, in order
-	@for f in $$(ls $(MIGRATIONS)/*.up.sql | sort); do \
-		echo "applying $$f"; \
-		psql -q -v ON_ERROR_STOP=1 -d $(TEST_DB) -f $$f || exit 1; \
-	done
+migrate-up: ## Apply pending migrations to TEST_DB
+	RECONSYNC_DATABASE_URL="$(TEST_DB_URL)" go run ./cmd/reconsyncctl migrate up
+
+migrate-status: ## What has run against TEST_DB, and what has not
+	RECONSYNC_DATABASE_URL="$(TEST_DB_URL)" go run ./cmd/reconsyncctl migrate status
 
 migrate-down: ## Roll every migration back on TEST_DB, newest first
 	@for f in $$(ls $(MIGRATIONS)/*.down.sql | sort -r); do \
 		echo "reverting $$f"; \
 		psql -q -v ON_ERROR_STOP=1 -d $(TEST_DB) -f $$f || exit 1; \
 	done
+	@# Clear the ledger too, or the next migrate-up reports "up to date"
+	@# against a database with no tables in it.
+	@psql -q -d $(TEST_DB) -c "TRUNCATE schema_migrations" 2>/dev/null || true
 
 ci: fmt vet crosscheck lint test-integration ## What CI runs
