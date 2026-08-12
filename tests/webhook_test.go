@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/evidence"
 	"github.com/nobledeveloper01/ReconSync/internal/webhook"
 )
 
@@ -457,7 +458,12 @@ func TestEnvelopeForReversal(t *testing.T) {
 		DetectedAt:           &detected,
 	}
 
-	env := webhook.EnvelopeFor(webhook.EventReversalTriggered, txn, detected)
+	ev := evidence.New()
+	ev.Add(evidence.SignalWindowExpired, "no credit within 300s", evidence.WeightWindowExpired)
+	ev.Add(evidence.SignalIngestIntact, "no events lost over this window", evidence.WeightIngestIntact)
+	ev.Add(evidence.SignalProviderFailed, "paystack reports the credit leg failed", evidence.WeightProviderFailed)
+
+	env := webhook.EnvelopeFor(webhook.EventReversalTriggered, txn, detected, ev)
 	if env.Event != webhook.EventReversalTriggered {
 		t.Errorf("event = %s", env.Event)
 	}
@@ -473,6 +479,18 @@ func TestEnvelopeForReversal(t *testing.T) {
 	// §10.1: the payload states that the receiver must check its own ledger.
 	if !env.Data.Advisory {
 		t.Error("payload must be marked advisory")
+	}
+
+	// Corroborated by the rail, so this should be near certainty.
+	if env.Data.Confidence < 0.9 {
+		t.Errorf("confidence = %v, want >= 0.9 when the rail confirmed failure", env.Data.Confidence)
+	}
+	if len(env.Data.Evidence) != 3 {
+		t.Fatalf("evidence has %d signals, want 3", len(env.Data.Evidence))
+	}
+	// Heaviest first, so the reason that mattered most reads first.
+	if env.Data.Evidence[0].Name != evidence.SignalWindowExpired {
+		t.Errorf("first signal is %s, want the heaviest", env.Data.Evidence[0].Name)
 	}
 
 	raw, err := webhook.Marshal(env)

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/evidence"
 )
 
 // EventType is the webhook event name (§7.2).
@@ -44,10 +45,20 @@ type Data struct {
 	// receiver must verify against its own ledger before moving money (§10.1).
 	// A compromise of ReconSync must not be able to cause a payment.
 	Advisory bool `json:"advisory"`
+
+	// Confidence is how sure we are that reversing is correct, 0 to 1. It lets a
+	// receiver set its own bar — auto-reverse above a threshold, queue for a
+	// human below — instead of treating every verdict as equally certain.
+	Confidence float64 `json:"confidence"`
+
+	// Evidence is what that number rests on, heaviest signal first.
+	Evidence []evidence.Signal `json:"evidence,omitempty"`
 }
 
-// EnvelopeFor builds the payload for a transaction event.
-func EnvelopeFor(event EventType, t *domain.Transaction, occurredAt time.Time) Envelope {
+// EnvelopeFor builds the payload for a transaction event. A nil evidence set
+// yields zero confidence and no signals, which is the honest reading of "we
+// recorded nothing".
+func EnvelopeFor(event EventType, t *domain.Transaction, occurredAt time.Time, ev *evidence.Set) Envelope {
 	return Envelope{
 		Event:      event,
 		OccurredAt: occurredAt.UTC(),
@@ -61,6 +72,8 @@ func EnvelopeFor(event EventType, t *domain.Transaction, occurredAt time.Time) E
 			DetectedAt:         t.DetectedAt,
 			RegulatoryDeadline: t.ExpectedCompletionAt,
 			Advisory:           true,
+			Confidence:         ev.Confidence(),
+			Evidence:           ev.Signals(),
 		},
 	}
 }

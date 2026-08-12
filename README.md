@@ -296,6 +296,36 @@ credential. A named variable that is unset refuses to start, because an empty
 credential would make every query fail, and every failure is `unknown` — which
 would silently stop all reversals.
 
+### `internal/evidence` — saying how sure we are
+
+A bare "orphaned" tells a receiver nothing about how much to trust it. The same
+word covered "we asked the rail and it confirmed the transfer failed" and "we
+know nothing else at all". Given the payload asks someone to move money, that is
+the wrong default.
+
+Every verdict now carries a `confidence` between 0 and 1 and the `evidence` it
+rests on:
+
+| Signal | Weight |
+| --- | --- |
+| `window_expired` — the window closed with no credit | 0.55 |
+| `ingest_intact` — our own view had no gaps | 0.15 |
+| `provider_failed` — the rail confirms the credit leg failed | 0.30 |
+| `provider_not_found` — the rail has no record of it | 0.25 |
+| `provider_unreachable` — we asked and got no answer | 0.00 |
+| `ingest_gap` — we dropped events over this window | 0.00 |
+
+The weights are chosen so **silence alone can never reach certainty**. An
+uncorroborated reversal tops out at 0.70; only the rail confirming failure takes
+it to 1.00. That gap makes "we guessed" and "we checked" different numbers, right
+in front of the person deciding whether to auto-reverse.
+
+The zero-weight signals are recorded on purpose: `provider_unreachable` lets a
+receiver tell "we tried and failed" apart from "we never asked".
+
+It is a clamped sum, not a probability. Inventing a statistical model over
+signals we have not calibrated would dress a guess up as a measurement.
+
 ### `internal/pipeline` — bounded everything
 
 The §4.3 worker pool. Its whole job is to absorb load without ever blocking the
@@ -491,10 +521,19 @@ orphaned and queues a signed `reversal.triggered` webhook:
     "window_seconds": 300,
     "detected_at": "2026-08-11T09:19:25Z",
     "regulatory_deadline": "2026-08-11T09:19:22Z",
-    "advisory": true
+    "advisory": true,
+    "confidence": 0.7,
+    "evidence": [
+      {"signal": "window_expired", "value": "no credit within 300s", "weight": 0.55},
+      {"signal": "ingest_intact",  "value": "no events lost over this window", "weight": 0.15}
+    ]
   }
 }
 ```
+
+`confidence` is 0.70 here because nothing corroborated it — the window simply
+closed. With a rail configured and confirming failure it reaches 1.00. Set your
+own bar: auto-reverse above a threshold, queue for a human below.
 
 `regulatory_deadline` is included so the receiver can prioritise by urgency
 without knowing our rules — it removes a whole category of integration question.
@@ -663,6 +702,7 @@ internal/correlate/  matches credit legs to debits
 internal/pipeline/   bounded worker pool, batching, backpressure
 internal/auth/       API key issue and verification
 internal/ingest/     HTTP API, health, readiness, metrics
+internal/evidence/   what a verdict rests on, and how sure we are
 internal/health/     records whether our own view of each tenant was intact
 internal/provider/   asks the rail what actually happened, instead of guessing
 internal/webhook/    payload signing, retry policy, SSRF-guarded client
@@ -696,6 +736,7 @@ is delivered to the registered endpoint.
 | Ingest-gap awareness — never reverse on our own blind spot | Done |
 | Silence suppression — never mass-reverse during a tenant outage | Done |
 | Provider corroboration — ask the rail instead of inferring from silence | Done |
+| Confidence score + evidence trail on every verdict | Done, published but not yet persisted |
 | Docker Compose quickstart | **Not started** — needs a machine with Docker to verify |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |

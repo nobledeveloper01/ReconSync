@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/evidence"
 	"github.com/nobledeveloper01/ReconSync/internal/provider"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
 	"github.com/nobledeveloper01/ReconSync/internal/webhook"
@@ -172,10 +173,14 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 	endpoints := map[string][]*store.WebhookEndpoint{}
 
 	for _, txn := range claimed {
+		// Every verdict carries what it rests on, so a receiver can tell
+		// "we checked with the rail" apart from "we heard nothing".
+		ev := d.baseEvidence(ctx, txn)
+
 		// Ask the rail before anything leaves the building. This runs after the
 		// claim, so two replicas cannot both corroborate, and before the queue,
 		// so a wrong verdict never reaches the customer.
-		settled, err := d.corroborate(ctx, txn, now, &res)
+		settled, err := d.corroborate(ctx, txn, now, &res, ev)
 		if err != nil {
 			return res, err
 		}
@@ -205,7 +210,7 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 			endpoints[txn.TenantID] = eps
 		}
 
-		queued, err := d.queue(ctx, txn, event, eps)
+		queued, err := d.queue(ctx, txn, event, eps, ev)
 		if err != nil {
 			return res, err
 		}
@@ -225,7 +230,33 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 //
 // Only orphans are corroborated. A suspect transaction is already destined for a
 // human, and asking again would not change that.
-func (d *Detector) corroborate(ctx context.Context, txn *domain.Transaction, now time.Time, res *SweepResult) (bool, error) {
+// baseEvidence records what we knew before asking anyone: that the window
+// closed with no credit, and whether our own view of the stream was intact.
+//
+// Silence carries well under half the available confidence on purpose. Without
+// corroboration a reversal tops out around 0.70, which is the honest number for
+// "we inferred this".
+func (d *Detector) baseEvidence(ctx context.Context, txn *domain.Transaction) *evidence.Set {
+	ev := evidence.New()
+	ev.Add(evidence.SignalWindowExpired,
+		fmt.Sprintf("no credit within %ds", int(txn.Window()/time.Second)),
+		evidence.WeightWindowExpired)
+
+	gap, err := d.store.HasIngestGap(ctx, txn.TenantID, txn.DebitAt, txn.ExpectedCompletionAt)
+	switch {
+	case err != nil:
+		// Unable to check, so we cannot claim the view was intact. Record the
+		// uncertainty rather than silently crediting ourselves the weight.
+		ev.Add(evidence.SignalIngestGap, "could not verify ingest health", evidence.WeightIngestGap)
+	case gap:
+		ev.Add(evidence.SignalIngestGap, "events were dropped over this window", evidence.WeightIngestGap)
+	default:
+		ev.Add(evidence.SignalIngestIntact, "no events lost over this window", evidence.WeightIngestIntact)
+	}
+	return ev
+}
+
+func (d *Detector) corroborate(ctx context.Context, txn *domain.Transaction, now time.Time, res *SweepResult, ev *evidence.Set) (bool, error) {
 	if d.providers == nil || txn.Status != domain.StatusOrphaned {
 		return false, nil
 	}
@@ -254,7 +285,10 @@ func (d *Detector) corroborate(ctx context.Context, txn *domain.Transaction, now
 
 	case provider.Unknown:
 		// We could not establish anything. A guess here moves real money, so it
-		// goes to a human instead.
+		// goes to a human instead. Recorded with zero weight so the receiver can
+		// see we tried and failed, rather than that we never asked.
+		ev.Add(evidence.SignalProviderUnreachable, status.Detail, evidence.WeightProviderUnreached)
+
 		if _, err := d.store.MarkUncertain(ctx, txn.TenantID, txn.TransactionID, now); err != nil {
 			return false, d.tolerateRace(ctx, txn, "mark uncertain", err)
 		}
@@ -267,8 +301,16 @@ func (d *Detector) corroborate(ctx context.Context, txn *domain.Transaction, now
 			slog.String("detail", status.Detail))
 		return false, nil
 
-	default:
-		// failed or not_found: the orphan is confirmed, with evidence.
+	case provider.Failed:
+		// The only signal in the system that is evidence rather than inference.
+		ev.Add(evidence.SignalProviderFailed, status.Provider+" reports the credit leg failed",
+			evidence.WeightProviderFailed)
+		res.Corroborated++
+		return false, nil
+
+	default: // NotFound
+		ev.Add(evidence.SignalProviderNotFound, status.Provider+" has no record of this transaction",
+			evidence.WeightProviderNotFound)
 		res.Corroborated++
 		return false, nil
 	}
@@ -287,8 +329,8 @@ func (d *Detector) tolerateRace(ctx context.Context, txn *domain.Transaction, ac
 	return fmt.Errorf("%s %s: %w", action, txn.TransactionID, err)
 }
 
-func (d *Detector) queue(ctx context.Context, txn *domain.Transaction, event webhook.EventType, eps []*store.WebhookEndpoint) (int, error) {
-	payload, err := webhook.Marshal(webhook.EnvelopeFor(event, txn, d.now().UTC()))
+func (d *Detector) queue(ctx context.Context, txn *domain.Transaction, event webhook.EventType, eps []*store.WebhookEndpoint, ev *evidence.Set) (int, error) {
+	payload, err := webhook.Marshal(webhook.EnvelopeFor(event, txn, d.now().UTC(), ev))
 	if err != nil {
 		return 0, err
 	}
