@@ -515,6 +515,41 @@ forward) rather than a separate "sending" state. A worker that dies mid-attempt
 simply becomes claimable again when the lease lapses; there are no stuck rows to
 reap.
 
+### The reversal claim — exactly-once, guaranteed by us
+
+A reversal webhook can arrive more than once: a retry after a timeout the
+customer actually processed, a dead-letter replay, two of their workers picking
+up the same job. Until now we said "reverse this" and hoped they deduplicated.
+The claim makes it our guarantee.
+
+Before moving money, their worker calls
+`POST /v1/reversals/{transaction_id}/claim`. Exactly one caller gets `200` and a
+claim token; everyone else gets `409` naming the worker that already holds it.
+The interlock is a primary key, not application logic — a check-then-insert would
+race, and this is precisely the case where a race pays a customer twice.
+
+**The failure it is designed around is the naive client**: one that reverses
+whenever the call succeeds. That is why not being granted is a `409` rather than
+`200` with `"granted": false`. A client that reads only the status code still
+does the safe thing.
+
+It is also the **last checkpoint before money moves**, which is worth more than
+the deduplication. Only a `reversal_pending` transaction can be claimed: an
+orphan that has been detected but not yet advised on may still be settled by
+corroboration, and a reversal already confirmed is closed. So a claim re-reads
+the current verdict instead of trusting a webhook that may be minutes old.
+
+Two consequences are deliberate:
+
+- **A claim never expires.** A lease would let a second worker take over after a
+  timeout, which is the double-reversal this exists to prevent. If a worker dies
+  holding one, an operator calls `.../claim/release` — an explicit, recorded act.
+- **A confirmed claim is never released.** The money has already moved; handing
+  it to a second worker would move it again. `release` returns `409` for one.
+
+None of this makes ReconSync less advisory. We still never move money — we
+guarantee at-most-once *authorisation*, and their ledger remains the authority.
+
 ### `internal/drill` — testing the path that only runs during an incident
 
 The reversal webhook is the one code path a customer never exercises. Six quiet
@@ -696,6 +731,8 @@ Because payloads come in more than one shape, a receiver should switch on
 | GET | `/v1/audit/verify` | Recompute the tenant's audit chain and report any tampering. |
 | GET | `/v1/reports/reversal-compliance` | Prove every reversal met its deadline. `format=json\|csv`. |
 | POST | `/v1/fire-drill` | Send a synthetic reversal to your own endpoints and report what they did. |
+| POST | `/v1/reversals/{id}/claim` | Take the exclusive right to reverse. `409` if someone already holds it. |
+| POST | `/v1/reversals/{id}/claim/release` | Free a claim whose holder died before reversing. |
 | GET | `/healthz` `/readyz` `/metrics` | Liveness, readiness, Prometheus metrics. |
 
 Ingest is asynchronous, so both event endpoints return `202 Accepted` rather
@@ -886,6 +923,7 @@ is delivered to the registered endpoint.
 | Silence suppression — never mass-reverse during a tenant outage | Done |
 | Silence alerting — `integration.silent` / `integration.recovered` | Done |
 | Fire drill — `POST /v1/fire-drill` | Done |
+| Reversal claim ledger — exactly-once interlock | Done |
 | Provider corroboration — ask the rail instead of inferring from silence | Done |
 | Confidence score + evidence trail on every verdict | Done |
 | Audit hash chain + `GET /v1/audit/verify` | Done |

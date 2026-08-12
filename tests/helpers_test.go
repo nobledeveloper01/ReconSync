@@ -32,6 +32,7 @@ const (
 // Torn down in reverse order, then rebuilt, so each run starts from a known
 // schema regardless of what the previous one left behind.
 var migrationFiles = []string{
+	"0007_reversal_claims.down.sql",
 	"0006_silence_episodes.down.sql",
 	"0005_audit_chain.down.sql",
 	"0004_ingest_health.down.sql",
@@ -44,6 +45,7 @@ var migrationFiles = []string{
 	"0004_ingest_health.up.sql",
 	"0005_audit_chain.up.sql",
 	"0006_silence_episodes.up.sql",
+	"0007_reversal_claims.up.sql",
 }
 
 // testPool connects to the database named by RECONSYNC_TEST_DATABASE_URL and
@@ -84,7 +86,7 @@ func truncate(t *testing.T, pool *pgxpool.Pool) {
 	// audit_records is excluded: it is append-only and rejects TRUNCATE.
 	_, err := pool.Exec(context.Background(),
 		`TRUNCATE transactions, pending_credits, reconciliation_rules, webhook_deliveries,
-		 webhook_endpoints, api_keys, ingest_health, tenant_silence, tenants
+		 webhook_endpoints, api_keys, ingest_health, tenant_silence, reversal_claims, tenants
 		 RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("truncate: %v", err)

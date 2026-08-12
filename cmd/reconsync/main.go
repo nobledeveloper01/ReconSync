@@ -198,6 +198,7 @@ func run() error {
 		Audit:   db,
 		Reports: db,
 		Drills:  drills,
+		Claims:  db,
 		Auth:    authenticator,
 		Logger:  log,
 		Ready:   func(ctx context.Context) error { return pool.Ping(ctx) },

@@ -68,6 +68,8 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"SyncSilenceEpisodes", testSyncSilenceEpisodes},
 		{"SilenceIsDatedFromTheLastEvent", testSilenceIsDatedFromTheLastEvent},
 		{"SilenceEpisodesAreIndependent", testSilenceEpisodesAreIndependent},
+		{"ReversalClaims", testReversalClaims},
+		{"ReleaseAndReclaim", testReleaseAndReclaim},
 		{"AuditChainAppend", testAuditChainAppend},
 		{"AuditRoundTripsContent", testAuditRoundTripsContent},
 		{"AuditChainsAreTenantScoped", testAuditChainsAreTenantScoped},

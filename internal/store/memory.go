@@ -44,6 +44,9 @@ type Memory struct {
 	// open silence episodes by tenant
 	silence map[string]time.Time
 
+	// reversal claims by tenant and transaction
+	claims map[claimKey]*ReversalClaim
+
 	// per-tenant audit chain, in sequence order
 	audit map[string][]audit.Record
 
@@ -67,6 +70,7 @@ func NewMemory() *Memory {
 		rules:      make(map[string][]rules.Rule),
 		health:     make(map[healthKey]IngestSample),
 		silence:    make(map[string]time.Time),
+		claims:     make(map[claimKey]*ReversalClaim),
 		audit:      make(map[string][]audit.Record),
 	}
 }

@@ -310,6 +310,41 @@ type AuditStore interface {
 	ListAudit(ctx context.Context, tenantID string, limit int) ([]audit.Record, error)
 }
 
+// ReversalClaim is one customer worker's authorisation to reverse.
+type ReversalClaim struct {
+	TenantID      string
+	TransactionID string
+	ClaimToken    string
+	ClaimedBy     string
+	ClaimedAt     time.Time
+	ConfirmedAt   *time.Time
+}
+
+// ClaimStore is the exactly-once interlock between our advice and their money
+// movement.
+//
+// The same reversal webhook can arrive more than once — a retry after a timeout
+// they actually processed, a dead-letter replay, two of their workers on the
+// same job. Today we say "reverse this" and hope they deduplicate; this makes it
+// our guarantee.
+type ClaimStore interface {
+	// ClaimReversal grants the claim to the first caller and reports the
+	// existing holder to everyone after. Not granting is a normal outcome, not
+	// an error: the caller's correct response is simply to stop.
+	ClaimReversal(ctx context.Context, tenantID, transactionID, claimedBy, token string, now time.Time) (claim *ReversalClaim, granted bool, err error)
+
+	// GetReversalClaim returns the claim on a transaction, if any.
+	GetReversalClaim(ctx context.Context, tenantID, transactionID string) (*ReversalClaim, error)
+
+	// ReleaseReversalClaim drops an unconfirmed claim so it can be taken again,
+	// for the case where the holder died between claiming and reversing.
+	// Confirmed claims are never released — the money has already moved.
+	ReleaseReversalClaim(ctx context.Context, tenantID, transactionID string) error
+
+	// ConfirmReversalClaim marks the claim as carried through.
+	ConfirmReversalClaim(ctx context.Context, tenantID, transactionID string, at time.Time) error
+}
+
 // ReportStore backs the compliance report.
 type ReportStore interface {
 	// CountByStatus aggregates in the database, so a healthy tenant's millions
@@ -331,4 +366,5 @@ type Store interface {
 	HealthStore
 	AuditStore
 	ReportStore
+	ClaimStore
 }

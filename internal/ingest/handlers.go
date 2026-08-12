@@ -1,10 +1,13 @@
 package ingest
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -277,6 +280,20 @@ func (s *Server) handleReversalCompleted(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Close the claim that authorised this, if one was taken. Best effort: a
+	// confirmation that arrives without a claim is normal — the interlock is
+	// opt-in, and refusing to record a real reversal because its bookkeeping is
+	// missing would be the wrong trade.
+	if s.claims != nil {
+		if err := s.claims.ConfirmReversalClaim(r.Context(), ev.TenantID, ev.TransactionID, ev.CompletedAt); err != nil &&
+			!errors.Is(err, store.ErrNotFound) {
+			s.log.ErrorContext(r.Context(), "could not confirm the reversal claim",
+				slog.String("tenant_id", ev.TenantID),
+				slog.String("transaction_id", ev.TransactionID),
+				slog.String("error", err.Error()))
+		}
+	}
+
 	out := reversalCompleted{
 		Status:        "recorded",
 		TransactionID: txn.TransactionID,
@@ -385,6 +402,149 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 	// failed request — 200 with verified:false. A 5xx would suggest our bug and
 	// send the operator looking in the wrong place.
 	s.writeJSON(w, r, http.StatusOK, result)
+}
+
+type claimRequest struct {
+	ClaimedBy string `json:"claimed_by"`
+}
+
+type claimResponse struct {
+	Granted       bool      `json:"granted"`
+	TransactionID string    `json:"transaction_id"`
+	ClaimToken    string    `json:"claim_token,omitempty"`
+	ClaimedBy     string    `json:"claimed_by"`
+	ClaimedAt     time.Time `json:"claimed_at"`
+	Status        string    `json:"transaction_status"`
+
+	// Instruction is what to do about it, in words, because the caller is a
+	// worker about to move money.
+	Instruction string `json:"instruction"`
+}
+
+// claimableStatus is the one state in which reversing is still the right advice.
+//
+// This is the point of the interlock beyond deduplication: between the webhook
+// leaving and their worker acting, the rail may have confirmed the credit
+// arrived. The claim is the last checkpoint before money moves, so it re-reads
+// the current verdict rather than trusting a webhook that may be minutes old.
+//
+// Only reversal_pending, deliberately. An orphan has been detected but not yet
+// advised on — corroboration may still settle it — and reversal_completed is
+// reachable only from here, so claiming any other state would hand out a claim
+// that could never be confirmed.
+const claimableStatus = domain.StatusReversalPending
+
+// handleClaimReversal grants exactly one caller the right to reverse.
+func (s *Server) handleClaimReversal(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if s.claims == nil {
+		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
+			"reversal claims are not configured on this deployment", "")
+		return
+	}
+
+	transactionID := r.PathValue("transaction_id")
+	var req claimRequest
+	if r.ContentLength > 0 && !s.decode(w, r, s.maxBody, &req) {
+		return
+	}
+	if req.ClaimedBy == "" {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
+			"claimed_by is required: name the worker taking the claim, so an outstanding one can be traced", "claimed_by")
+		return
+	}
+
+	txn, err := s.store.Get(r.Context(), principal.TenantID, transactionID)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+	if txn.Status != claimableStatus {
+		// 409, not 200-with-a-flag: a client that checks only the status code
+		// then does the safe thing by default.
+		s.writeError(w, r, http.StatusConflict, "not_reversible",
+			fmt.Sprintf("this transaction is %s, not %s; there is no standing advice to reverse it",
+				txn.Status, claimableStatus),
+			"")
+		return
+	}
+
+	token, err := newClaimToken()
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	claim, granted, err := s.claims.ClaimReversal(r.Context(), principal.TenantID,
+		transactionID, req.ClaimedBy, token, s.now().UTC())
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	out := claimResponse{
+		Granted:       granted,
+		TransactionID: transactionID,
+		ClaimedBy:     claim.ClaimedBy,
+		ClaimedAt:     claim.ClaimedAt,
+		Status:        txn.Status.String(),
+	}
+	if !granted {
+		// Also 409. The whole value of this endpoint is that a naive client —
+		// one that reverses whenever the call succeeds — cannot double-pay.
+		out.Instruction = "another worker already holds this reversal; do not reverse"
+		s.writeJSON(w, r, http.StatusConflict, out)
+		return
+	}
+
+	out.ClaimToken = claim.ClaimToken
+	out.Instruction = "you hold this reversal. Reverse it, then confirm with POST /v1/events/reversal-completed"
+	s.writeJSON(w, r, http.StatusOK, out)
+}
+
+// handleReleaseReversalClaim frees a claim whose holder died before reversing.
+func (s *Server) handleReleaseReversalClaim(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if s.claims == nil {
+		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
+			"reversal claims are not configured on this deployment", "")
+		return
+	}
+
+	transactionID := r.PathValue("transaction_id")
+	err := s.claims.ReleaseReversalClaim(r.Context(), principal.TenantID, transactionID)
+	if errors.Is(err, store.ErrNotFound) {
+		// Either there is no claim, or it is confirmed. Both mean the same
+		// thing to the caller: there is nothing here that is safe to release.
+		s.writeError(w, r, http.StatusConflict, "not_releasable",
+			"no unconfirmed claim on this transaction; a confirmed claim is never released because the money has already moved", "")
+		return
+	}
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]any{
+		"status":         "released",
+		"transaction_id": transactionID,
+		"instruction":    "the reversal can be claimed again",
+	})
+}
+
+func newClaimToken() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate claim token: %w", err)
+	}
+	return "rcl_" + hex.EncodeToString(b[:]), nil
 }
 
 // handleFireDrill delivers a synthetic reversal to the customer's own endpoints

@@ -115,6 +115,7 @@ func newIngestFixture(t *testing.T, opts fixtureOpts) *ingestFixture {
 		Audit:   s,
 		Reports: s,
 		Drills:  opts.drills,
+		Claims:  s,
 		Auth:    authenticator,
 		Ready:   opts.ready,
 	})

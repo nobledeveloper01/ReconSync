@@ -61,6 +61,9 @@ type Options struct {
 	// Drills backs POST /v1/fire-drill. Optional.
 	Drills DrillRunner
 
+	// Claims backs the reversal claim interlock. Optional.
+	Claims store.ClaimStore
+
 	// Ready reports dependency health for /readyz. Liveness never calls it.
 	Ready func(ctx context.Context) error
 
@@ -88,6 +91,7 @@ type Server struct {
 	audit   store.AuditStore
 	reports store.ReportStore
 	drills  DrillRunner
+	claims  store.ClaimStore
 	auth    *auth.Authenticator
 	ready   func(ctx context.Context) error
 	log     *slog.Logger
@@ -119,6 +123,7 @@ func New(opts Options) (*Server, error) {
 		audit:       opts.Audit,
 		reports:     opts.Reports,
 		drills:      opts.Drills,
+		claims:      opts.Claims,
 		auth:        opts.Auth,
 		ready:       opts.Ready,
 		log:         opts.Logger,
@@ -163,6 +168,8 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("GET /v1/audit/verify", s.handleAuditVerify)
 	api.HandleFunc("GET /v1/reports/reversal-compliance", s.handleComplianceReport)
 	api.HandleFunc("POST /v1/fire-drill", s.handleFireDrill)
+	api.HandleFunc("POST /v1/reversals/{transaction_id}/claim", s.handleClaimReversal)
+	api.HandleFunc("POST /v1/reversals/{transaction_id}/claim/release", s.handleReleaseReversalClaim)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", s.authenticate(api))
