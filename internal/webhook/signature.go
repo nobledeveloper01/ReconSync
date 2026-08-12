@@ -22,6 +22,10 @@ const (
 	// DeliveryHeader is the delivery id, for idempotent receipt and support.
 	DeliveryHeader = "X-ReconSync-Delivery"
 
+	// DrillHeader is set only on a fire drill, so a handler can refuse the
+	// payload before parsing it. Never set on a real event.
+	DrillHeader = "X-ReconSync-Drill"
+
 	// DefaultTolerance bounds replay of a captured request. Wide enough for real
 	// clock skew, narrow enough that a captured payload expires quickly.
 	DefaultTolerance = 5 * time.Minute

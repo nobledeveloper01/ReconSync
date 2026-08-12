@@ -20,6 +20,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/correlate"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/drill"
 	"github.com/nobledeveloper01/ReconSync/internal/health"
 	"github.com/nobledeveloper01/ReconSync/internal/ingest"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
@@ -170,12 +171,33 @@ func run() error {
 		return err
 	}
 
+	if cfg.allowPrivateWebhookTargets {
+		log.Warn("webhook SSRF guard disabled: deliveries may reach private addresses. " +
+			"This must never be set outside local development.")
+	}
+
+	// The drill and the dispatcher share one sender and one secret resolver, so
+	// a drill travels exactly the path a real reversal does. Testing a different
+	// path would prove nothing about the real one.
+	secrets := func(context.Context, string) (string, error) { return cfg.webhookSecret, nil }
+	sender := webhook.NewSender(webhook.SenderOptions{
+		Client: webhook.NewClient(webhook.TransportOptions{
+			AllowPrivateAddresses: cfg.allowPrivateWebhookTargets,
+		}),
+	})
+
+	drills, err := drill.New(drill.Options{Store: db, Sender: sender, Secrets: secrets})
+	if err != nil {
+		return err
+	}
+
 	api, err := ingest.New(ingest.Options{
 		Sink:    pipe,
 		Rules:   ruleProvider,
 		Store:   db,
 		Audit:   db,
 		Reports: db,
+		Drills:  drills,
 		Auth:    authenticator,
 		Logger:  log,
 		Ready:   func(ctx context.Context) error { return pool.Ping(ctx) },
@@ -201,18 +223,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if cfg.allowPrivateWebhookTargets {
-		log.Warn("webhook SSRF guard disabled: deliveries may reach private addresses. " +
-			"This must never be set outside local development.")
-	}
 	dispatcher, err := service.NewDispatcher(db, service.DispatcherOptions{
 		Logger:  log,
-		Secrets: func(context.Context, string) (string, error) { return cfg.webhookSecret, nil },
-		Sender: webhook.NewSender(webhook.SenderOptions{
-			Client: webhook.NewClient(webhook.TransportOptions{
-				AllowPrivateAddresses: cfg.allowPrivateWebhookTargets,
-			}),
-		}),
+		Secrets: secrets,
+		Sender:  sender,
 	})
 	if err != nil {
 		return err

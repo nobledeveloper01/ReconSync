@@ -13,6 +13,7 @@ import (
 
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/drill"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
@@ -57,6 +58,9 @@ type Options struct {
 	// Reports backs GET /v1/reports/reversal-compliance. Optional.
 	Reports store.ReportStore
 
+	// Drills backs POST /v1/fire-drill. Optional.
+	Drills DrillRunner
+
 	// Ready reports dependency health for /readyz. Liveness never calls it.
 	Ready func(ctx context.Context) error
 
@@ -69,6 +73,13 @@ type Options struct {
 	RetryAfter time.Duration
 }
 
+// DrillRunner delivers a synthetic reversal to the tenant's own endpoints. An
+// interface rather than the concrete runner, so the HTTP layer does not depend
+// on the transport a drill happens to use.
+type DrillRunner interface {
+	Run(ctx context.Context, tenantID string) (drill.Report, error)
+}
+
 // Server serves the ingest API.
 type Server struct {
 	sink    EventSink
@@ -76,6 +87,7 @@ type Server struct {
 	store   store.TransactionStore
 	audit   store.AuditStore
 	reports store.ReportStore
+	drills  DrillRunner
 	auth    *auth.Authenticator
 	ready   func(ctx context.Context) error
 	log     *slog.Logger
@@ -106,6 +118,7 @@ func New(opts Options) (*Server, error) {
 		store:       opts.Store,
 		audit:       opts.Audit,
 		reports:     opts.Reports,
+		drills:      opts.Drills,
 		auth:        opts.Auth,
 		ready:       opts.Ready,
 		log:         opts.Logger,
@@ -149,6 +162,7 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("GET /v1/transactions/{transaction_id}", s.handleGetTransaction)
 	api.HandleFunc("GET /v1/audit/verify", s.handleAuditVerify)
 	api.HandleFunc("GET /v1/reports/reversal-compliance", s.handleComplianceReport)
+	api.HandleFunc("POST /v1/fire-drill", s.handleFireDrill)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", s.authenticate(api))

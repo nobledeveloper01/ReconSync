@@ -515,6 +515,34 @@ forward) rather than a separate "sending" state. A worker that dies mid-attempt
 simply becomes claimable again when the lease lapses; there are no stuck rows to
 reap.
 
+### `internal/drill` — testing the path that only runs during an incident
+
+The reversal webhook is the one code path a customer never exercises. Six quiet
+months later the first real one arrives at a handler that was refactored in month
+two, and nobody finds out until it matters. `POST /v1/fire-drill` is how they
+find out on a Tuesday afternoon instead.
+
+It sends a synthetic reversal through **the same** sender, signing and
+SSRF-guarded transport a real one uses — testing a different path would prove
+nothing about the real one — and reports what each endpoint did, synchronously.
+An integration test whose result you have to go looking for does not get run.
+
+Two properties make it safe to run in production, which is the only place worth
+running it:
+
+- **Impossible to mistake for a real reversal.** `X-ReconSync-Drill: true` lets a
+  handler refuse before parsing, `"drill": true` is in the payload for one that
+  parses first, and the transaction id carries a `drill_` prefix. A drill that
+  could be acted on would be worse than no drill at all.
+- **It writes nothing.** No transaction, no delivery row, no state change. A
+  drill that left rows behind would contaminate the compliance report it exists
+  to support.
+
+Failures are reported with a diagnosis rather than a status code, because a
+rejected signature and a crashed handler need different fixes. Having no endpoint
+registered returns `409` — that is a real finding, not a server fault: a genuine
+reversal would have nowhere to go either.
+
 ---
 
 ## 4. Quick start
@@ -667,6 +695,7 @@ Because payloads come in more than one shape, a receiver should switch on
 | GET | `/v1/transactions?status=&limit=` | List by state. |
 | GET | `/v1/audit/verify` | Recompute the tenant's audit chain and report any tampering. |
 | GET | `/v1/reports/reversal-compliance` | Prove every reversal met its deadline. `format=json\|csv`. |
+| POST | `/v1/fire-drill` | Send a synthetic reversal to your own endpoints and report what they did. |
 | GET | `/healthz` `/readyz` `/metrics` | Liveness, readiness, Prometheus metrics. |
 
 Ingest is asynchronous, so both event endpoints return `202 Accepted` rather
@@ -824,6 +853,7 @@ internal/evidence/   what a verdict rests on, and how sure we are
 internal/health/     records whether our own view of each tenant was intact
 internal/provider/   asks the rail what actually happened, instead of guessing
 internal/report/     the reversal SLA compliance report
+internal/drill/      exercises the reversal path on demand
 internal/webhook/    payload signing, retry policy, SSRF-guarded client
 internal/service/    detection sweep and webhook dispatch loops
 migrations/          schema, applied forward and backward in tests
@@ -855,6 +885,7 @@ is delivered to the registered endpoint.
 | Ingest-gap awareness — never reverse on our own blind spot | Done |
 | Silence suppression — never mass-reverse during a tenant outage | Done |
 | Silence alerting — `integration.silent` / `integration.recovered` | Done |
+| Fire drill — `POST /v1/fire-drill` | Done |
 | Provider corroboration — ask the rail instead of inferring from silence | Done |
 | Confidence score + evidence trail on every verdict | Done |
 | Audit hash chain + `GET /v1/audit/verify` | Done |

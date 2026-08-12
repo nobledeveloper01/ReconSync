@@ -32,6 +32,8 @@ type ingestFixture struct {
 }
 
 type fixtureOpts struct {
+	drills ingest.DrillRunner
+
 	ruleSet   *rules.Set
 	ready     func(ctx context.Context) error
 	blockPipe bool // hold the worker so the queue fills, for backpressure
@@ -112,6 +114,7 @@ func newIngestFixture(t *testing.T, opts fixtureOpts) *ingestFixture {
 		Store:   s,
 		Audit:   s,
 		Reports: s,
+		Drills:  opts.drills,
 		Auth:    authenticator,
 		Ready:   opts.ready,
 	})

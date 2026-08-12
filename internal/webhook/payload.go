@@ -60,6 +60,14 @@ type Data struct {
 
 	// Evidence is what that number rests on, heaviest signal first.
 	Evidence []evidence.Signal `json:"evidence,omitempty"`
+
+	// Drill marks a synthetic transaction sent by a fire drill. It is absent
+	// from every real event, so a handler can treat its presence as an
+	// instruction to acknowledge and do nothing else.
+	//
+	// A drill that could be mistaken for a real reversal would be worse than no
+	// drill at all, which is why this is in the payload as well as a header.
+	Drill bool `json:"drill,omitempty"`
 }
 
 // EnvelopeFor builds the payload for a transaction event. A nil evidence set

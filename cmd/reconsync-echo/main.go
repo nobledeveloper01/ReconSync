@@ -64,6 +64,16 @@ func main() {
 		fmt.Printf("\nVERIFIED  event=%s delivery=%s\n  %s\n", head.Event,
 			r.Header.Get(webhook.DeliveryHeader), pretty.String())
 
+		// A fire drill is a synthetic transaction. Acknowledge it so the drill
+		// records a pass, and stop here — acting on it would move money against
+		// a transaction that never existed. The header is checked rather than
+		// the payload so this decision happens before any parsing.
+		if r.Header.Get(webhook.DrillHeader) == "true" {
+			fmt.Println("  ↳ fire drill: acknowledged, no action taken")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		// A real handler would now check its own ledger before moving money —
 		// the payload is marked advisory precisely because we cannot be trusted
 		// as the sole authority.

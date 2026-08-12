@@ -26,6 +26,10 @@ type Delivery struct {
 	Event         EventType
 	Payload       []byte
 	Attempt       int
+
+	// Drill sets the drill header. Only a fire drill sets it, and the queue
+	// never carries one, so a real reversal cannot acquire it by accident.
+	Drill bool
 }
 
 // Result records what happened, for the delivery log and the retry decision.
@@ -84,7 +88,15 @@ func (s *Sender) Send(ctx context.Context, d Delivery) Result {
 	req.Header.Set("User-Agent", s.userAgent)
 	req.Header.Set(SignatureHeader, Sign(d.Secret, started, d.Payload))
 	req.Header.Set(EventHeader, string(d.Event))
-	req.Header.Set(DeliveryHeader, fmt.Sprintf("dlv_%d", d.ID))
+	if d.Drill {
+		// A drill has no queue row, so it borrows its own transaction id rather
+		// than rendering as dlv_0. A receiver deduplicating on this header would
+		// otherwise treat every drill it ever received as the same delivery.
+		req.Header.Set(DeliveryHeader, d.TransactionID)
+		req.Header.Set(DrillHeader, "true")
+	} else {
+		req.Header.Set(DeliveryHeader, fmt.Sprintf("dlv_%d", d.ID))
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {

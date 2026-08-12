@@ -13,6 +13,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/audit"
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/drill"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
 	"github.com/nobledeveloper01/ReconSync/internal/report"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
@@ -384,6 +385,42 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 	// failed request — 200 with verified:false. A 5xx would suggest our bug and
 	// send the operator looking in the wrong place.
 	s.writeJSON(w, r, http.StatusOK, result)
+}
+
+// handleFireDrill delivers a synthetic reversal to the customer's own endpoints
+// and reports what each did.
+//
+// Synchronous on purpose: an integration test whose result you have to go
+// looking for does not get run.
+func (s *Server) handleFireDrill(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if s.drills == nil {
+		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
+			"fire drills are not configured on this deployment", "")
+		return
+	}
+
+	report, err := s.drills.Run(r.Context(), principal.TenantID)
+	if errors.Is(err, drill.ErrNoEndpoint) {
+		// Nothing registered is a real finding, not a server fault: it means a
+		// genuine reversal would have nowhere to go either.
+		s.writeError(w, r, http.StatusConflict, "no_endpoint",
+			"no enabled endpoint subscribes to reversal.triggered, so a real reversal would not be delivered either", "")
+		return
+	}
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	// A failing drill is a successful test that found a problem. 200 with
+	// failed > 0 — a 5xx would point the operator at us instead of at their
+	// handler.
+	s.writeJSON(w, r, http.StatusOK, report)
 }
 
 // maxReportCandidates bounds how many detected transactions one report examines.
