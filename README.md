@@ -648,6 +648,28 @@ takes to take effect, which is why `Invalidate` exists.
 Every authentication failure returns the same error. A caller must not be able
 to tell an unknown key from a revoked one from a wrong one.
 
+**Scopes** split the key that reports events from the key that changes where
+reversals are delivered:
+
+```bash
+reconsyncctl keys create --tenant tnt_acme --scopes events:write
+reconsyncctl keys create --tenant tnt_acme --scopes endpoints:write
+```
+
+The split exists because those two keys live in different places. The ingest key
+sits in the transaction service, is handled by the most code, and leaks most
+easily — and whoever can change the delivery target decides where every reversal
+payload goes. `POST /v1/webhooks` therefore requires `endpoints:write`, and an
+ingest key gets `403` naming the scope it lacks.
+
+A key with **no** scopes has full access, which is what a first-run key gets and
+what every key issued before scopes existed still has. Defaulting the other way
+would have locked out every deployment on upgrade.
+
+An unknown scope is refused at creation: `endpoint:write` instead of
+`endpoints:write` would silently deny the key everything it was meant to do, and
+the operator would go looking at the endpoint rather than the typo.
+
 ### `internal/ingest` — the HTTP surface
 
 Handlers, authentication middleware, request IDs, panic recovery, body size
@@ -660,6 +682,29 @@ meaningless.
 Pointing a liveness probe at a dependency turns a brief database blip into a
 simultaneous restart of every pod — a recoverable incident converted into an
 outage. `/readyz` is the one that checks dependencies.
+
+#### Managing endpoints over HTTP
+
+`/v1/webhooks` exists so registering a delivery target does not require shell
+access to the server. It deliberately refuses the two relaxations the CLI
+offers: `reconsyncctl` runs on the host, by someone who already has a shell,
+while this endpoint answers the internet. Letting a remote caller register
+`http://169.254.169.254` would turn the dispatcher into an SSRF proxy against
+the deployment's own metadata service, so plaintext and private addresses are
+simply rejected here.
+
+Two smaller decisions:
+
+- **No secret in the request body.** The endpoint stores a *reference* to the
+  signing secret, never the secret. Accepting one over the API would put a
+  signing key in a request body, a log line and a proxy buffer.
+- **Disable rather than delete.** Deleting takes the delivery history with it,
+  so `PATCH {"enabled": false}` is the way to stop delivery while keeping the
+  record of what was sent where. The delete response says so.
+
+An unknown event name is rejected rather than stored: an endpoint subscribed to
+`reversal.triggerd` would sit there delivering nothing, which is a worse outcome
+than a `400`.
 
 ### `internal/webhook` — signing, retries, and not getting used as an SSRF pivot
 
@@ -953,6 +998,10 @@ Because payloads come in more than one shape, a receiver should switch on
 | POST | `/v1/fire-drill` | Send a synthetic reversal to your own endpoints and report what they did. |
 | POST | `/v1/reversals/{id}/claim` | Take the exclusive right to reverse. `409` if someone already holds it. |
 | POST | `/v1/reversals/{id}/claim/release` | Free a claim whose holder died before reversing. |
+| GET | `/v1/webhooks` | List delivery endpoints. |
+| POST | `/v1/webhooks` | Register one. Needs `endpoints:write`. |
+| PATCH | `/v1/webhooks/{id}` | Enable or disable delivery. Needs `endpoints:write`. |
+| DELETE | `/v1/webhooks/{id}` | Remove one, and its delivery history. Needs `endpoints:write`. |
 | GET | `/healthz` `/readyz` `/metrics` | Liveness, readiness, Prometheus metrics. |
 
 Ingest is asynchronous, so both event endpoints return `202 Accepted` rather
@@ -1154,6 +1203,6 @@ is delivered to the registered endpoint.
 | Signed chain checkpoints (Ed25519, `GET /v1/audit/checkpoints`) | Done |
 | Docker Compose quickstart | Done — verified end to end on Docker 29.5 |
 | Rules and endpoints managed via `reconsyncctl` | Done |
-| Endpoint management HTTP API | **Not started** — CLI only, no `/v1/webhooks` yet |
+| Endpoint management HTTP API (`/v1/webhooks`) | Done |
 | PDF report export | **Not started** — JSON and CSV only |
 | Dashboard, SDKs | **Not started** |

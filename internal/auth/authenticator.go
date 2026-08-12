@@ -42,6 +42,24 @@ type Principal struct {
 	Scopes      []string
 }
 
+// Scopes an API key can hold. A key with none has full access, which is what a
+// first-run key gets and what every key issued before scopes existed has.
+//
+// The distinction that matters: an ingest key lives in the customer's
+// transaction service, where it is handled by the most code and leaks most
+// easily. Registering a webhook endpoint decides where reversal payloads are
+// sent, and must not be something that key can do.
+const (
+	// ScopeEventsWrite reports transactions. The high-volume, low-privilege key.
+	ScopeEventsWrite = "events:write"
+
+	// ScopeReportsRead reads reports and transaction state.
+	ScopeReportsRead = "reports:read"
+
+	// ScopeEndpointsWrite changes where webhooks are delivered.
+	ScopeEndpointsWrite = "endpoints:write"
+)
+
 // HasScope reports whether the principal holds a scope. An empty scope list on
 // the key means full access, which is what a first-run key gets.
 func (p Principal) HasScope(want string) bool {

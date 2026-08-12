@@ -64,6 +64,9 @@ type Options struct {
 	// Claims backs the reversal claim interlock. Optional.
 	Claims store.ClaimStore
 
+	// Webhooks backs /v1/webhooks endpoint management. Optional.
+	Webhooks store.WebhookStore
+
 	// Ready reports dependency health for /readyz. Liveness never calls it.
 	Ready func(ctx context.Context) error
 
@@ -85,18 +88,19 @@ type DrillRunner interface {
 
 // Server serves the ingest API.
 type Server struct {
-	sink    EventSink
-	rules   RuleProvider
-	store   store.TransactionStore
-	audit   store.AuditStore
-	reports store.ReportStore
-	drills  DrillRunner
-	claims  store.ClaimStore
-	auth    *auth.Authenticator
-	ready   func(ctx context.Context) error
-	log     *slog.Logger
-	now     func() time.Time
-	handler http.Handler
+	sink     EventSink
+	rules    RuleProvider
+	store    store.TransactionStore
+	audit    store.AuditStore
+	reports  store.ReportStore
+	drills   DrillRunner
+	claims   store.ClaimStore
+	webhooks store.WebhookStore
+	auth     *auth.Authenticator
+	ready    func(ctx context.Context) error
+	log      *slog.Logger
+	now      func() time.Time
+	handler  http.Handler
 
 	maxBody     int64
 	maxBulkBody int64
@@ -124,6 +128,7 @@ func New(opts Options) (*Server, error) {
 		reports:     opts.Reports,
 		drills:      opts.Drills,
 		claims:      opts.Claims,
+		webhooks:    opts.Webhooks,
 		auth:        opts.Auth,
 		ready:       opts.Ready,
 		log:         opts.Logger,
@@ -173,6 +178,12 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("POST /v1/fire-drill", s.handleFireDrill)
 	api.HandleFunc("POST /v1/reversals/{transaction_id}/claim", s.handleClaimReversal)
 	api.HandleFunc("POST /v1/reversals/{transaction_id}/claim/release", s.handleReleaseReversalClaim)
+	if opts := s.webhooks; opts != nil {
+		api.HandleFunc("GET /v1/webhooks", s.handleListWebhooks)
+		api.HandleFunc("POST /v1/webhooks", s.handleCreateWebhook)
+		api.HandleFunc("PATCH /v1/webhooks/{endpoint_id}", s.handlePatchWebhook)
+		api.HandleFunc("DELETE /v1/webhooks/{endpoint_id}", s.handleDeleteWebhook)
+	}
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", s.authenticate(api))

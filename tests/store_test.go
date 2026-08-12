@@ -52,6 +52,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"APIKeyRoundTrip", testAPIKeyRoundTrip},
 		{"APIKeyRevocation", testAPIKeyRevocation},
 		{"WebhookEndpoints", testWebhookEndpoints},
+		{"EndpointEnableAndDelete", testEndpointEnableAndDelete},
 		{"DeliveryQueue", testDeliveryQueue},
 		{"DeliveryLeasePreventsDoubleClaim", testDeliveryLease},
 		{"DeliveryReplay", testDeliveryReplay},

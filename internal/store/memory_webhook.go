@@ -22,6 +22,30 @@ func (m *Memory) CreateEndpoint(_ context.Context, tenantID string, ep *WebhookE
 	return nil
 }
 
+func (m *Memory) SetEndpointEnabled(_ context.Context, tenantID, id string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ep, ok := m.endpoints[id]
+	if !ok || ep.TenantID != tenantID {
+		return ErrNotFound
+	}
+	ep.Enabled = enabled
+	return nil
+}
+
+func (m *Memory) DeleteEndpoint(_ context.Context, tenantID, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ep, ok := m.endpoints[id]
+	if !ok || ep.TenantID != tenantID {
+		return ErrNotFound
+	}
+	delete(m.endpoints, id)
+	return nil
+}
+
 func (m *Memory) ListEndpoints(_ context.Context, tenantID string) ([]*WebhookEndpoint, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

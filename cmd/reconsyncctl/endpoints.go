@@ -24,7 +24,7 @@ func endpointsCreate(ctx context.Context, args []string) error {
 	url := fs.String("url", "", "https endpoint that receives webhooks")
 	id := fs.String("id", "", "endpoint id (generated when omitted)")
 	events := fs.String("events", "", "comma-separated event types (empty means all)")
-	secretRef := fs.String("secret-ref", "env://RECONSYNC_WEBHOOK_SECRET", "reference to the signing secret")
+	secretRef := fs.String("secret-ref", store.DefaultSecretRef, "reference to the signing secret")
 	allowPrivate := fs.Bool("allow-private", false, allowPrivateUsage)
 	allowInsecure := fs.Bool("allow-insecure", false,
 		"permit an http endpoint. Local development only: plaintext puts every payload on the wire")

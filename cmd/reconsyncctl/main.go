@@ -33,7 +33,7 @@ Usage:
   reconsyncctl migrate status                  what has run, what has not
   reconsyncctl migrate baseline                mark all applied, for an existing database
   reconsyncctl tenant create --id ID [--name N] [--env test|live]
-  reconsyncctl keys create --tenant ID [--env test|live]
+  reconsyncctl keys create --tenant ID [--env test|live] [--scopes a,b]
   reconsyncctl endpoints create --tenant ID --url URL [--events a,b]
                                [--allow-private] [--allow-insecure]  (dev only)
   reconsyncctl endpoints list --tenant ID
@@ -238,11 +238,17 @@ func keysCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("keys create", flag.ContinueOnError)
 	tenant := fs.String("tenant", "", "tenant id")
 	env := fs.String("env", "test", "test or live")
+	scopes := fs.String("scopes", "", "comma-separated scopes; empty means full access")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *tenant == "" {
 		return errors.New("--tenant is required")
+	}
+
+	granted, err := parseScopes(*scopes)
+	if err != nil {
+		return err
 	}
 
 	environment := auth.Environment(*env)
@@ -262,7 +268,7 @@ func keysCreate(ctx context.Context, args []string) error {
 	defer pool.Close()
 
 	keyID := fmt.Sprintf("key_%d", time.Now().UnixNano())
-	if err := store.NewPostgres(pool).CreateAPIKey(ctx, *tenant, keyID, key, nil); err != nil {
+	if err := store.NewPostgres(pool).CreateAPIKey(ctx, *tenant, keyID, key, granted); err != nil {
 		return err
 	}
 
@@ -270,4 +276,34 @@ func keysCreate(ctx context.Context, args []string) error {
 	fmt.Printf("key id: %s\nprefix: %s\nsecret: %s\n\n", keyID, key.Prefix, key.Secret)
 	fmt.Println("Store the secret now — it cannot be retrieved later.")
 	return nil
+}
+
+// parseScopes validates the requested scopes.
+//
+// An unknown scope is refused rather than stored: a key holding "endpoint:write"
+// instead of "endpoints:write" would be silently denied everything it was meant
+// to do, and the operator would debug the endpoint rather than the typo.
+func parseScopes(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	known := map[string]struct{}{
+		auth.ScopeEventsWrite:    {},
+		auth.ScopeReportsRead:    {},
+		auth.ScopeEndpointsWrite: {},
+	}
+
+	var out []string
+	for _, s := range strings.Split(raw, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if _, ok := known[s]; !ok {
+			return nil, fmt.Errorf("unknown scope %q; valid scopes are %s, %s, %s",
+				s, auth.ScopeEventsWrite, auth.ScopeReportsRead, auth.ScopeEndpointsWrite)
+		}
+		out = append(out, s)
+	}
+	return out, nil
 }

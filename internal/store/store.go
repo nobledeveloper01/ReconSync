@@ -136,6 +136,13 @@ type APIKeyStore interface {
 	RevokeAPIKey(ctx context.Context, tenantID, keyID string) error
 }
 
+// DefaultSecretRef is where the signing secret is found by default.
+//
+// A reference, not a secret: it names the environment variable to read. The
+// distinction is the point of the field — an endpoint row can be dumped,
+// reviewed or backed up without carrying a signing key.
+const DefaultSecretRef = "env://RECONSYNC_WEBHOOK_SECRET" //nolint:gosec // a variable name, not a credential
+
 // WebhookEndpoint is a registered destination for a tenant's events.
 type WebhookEndpoint struct {
 	ID        string
@@ -198,6 +205,16 @@ type DeliveryOutcome struct {
 type WebhookStore interface {
 	CreateEndpoint(ctx context.Context, tenantID string, ep *WebhookEndpoint) error
 	ListEndpoints(ctx context.Context, tenantID string) ([]*WebhookEndpoint, error)
+
+	// SetEndpointEnabled turns delivery to an endpoint on or off.
+	//
+	// Disabling rather than deleting is the safe way to stop deliveries: the
+	// delivery log keeps its foreign key, so the history of what was sent
+	// where survives the decision to stop sending.
+	SetEndpointEnabled(ctx context.Context, tenantID, id string, enabled bool) error
+
+	// DeleteEndpoint removes an endpoint and, by cascade, its delivery history.
+	DeleteEndpoint(ctx context.Context, tenantID, id string) error
 
 	// EnqueueDelivery queues a webhook for immediate delivery.
 	EnqueueDelivery(ctx context.Context, tenantID string, d *PendingDelivery) (int64, error)

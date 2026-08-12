@@ -109,15 +109,16 @@ func newIngestFixture(t *testing.T, opts fixtureOpts) *ingestFixture {
 	}
 
 	srv, err := ingest.New(ingest.Options{
-		Sink:    p,
-		Rules:   ruleProvider,
-		Store:   s,
-		Audit:   s,
-		Reports: s,
-		Drills:  opts.drills,
-		Claims:  s,
-		Auth:    authenticator,
-		Ready:   opts.ready,
+		Sink:     p,
+		Rules:    ruleProvider,
+		Store:    s,
+		Audit:    s,
+		Reports:  s,
+		Drills:   opts.drills,
+		Claims:   s,
+		Webhooks: s,
+		Auth:     authenticator,
+		Ready:    opts.ready,
 	})
 	if err != nil {
 		t.Fatalf("ingest.New: %v", err)

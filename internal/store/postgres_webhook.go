@@ -24,6 +24,31 @@ func (p *Postgres) CreateEndpoint(ctx context.Context, tenantID string, ep *Webh
 	return nil
 }
 
+func (p *Postgres) SetEndpointEnabled(ctx context.Context, tenantID, id string, enabled bool) error {
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE webhook_endpoints SET enabled = $3 WHERE tenant_id = $1 AND id = $2`,
+		tenantID, id, enabled)
+	if err != nil {
+		return fmt.Errorf("set endpoint enabled: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (p *Postgres) DeleteEndpoint(ctx context.Context, tenantID, id string) error {
+	tag, err := p.pool.Exec(ctx,
+		`DELETE FROM webhook_endpoints WHERE tenant_id = $1 AND id = $2`, tenantID, id)
+	if err != nil {
+		return fmt.Errorf("delete endpoint: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (p *Postgres) ListEndpoints(ctx context.Context, tenantID string) ([]*WebhookEndpoint, error) {
 	rows, err := p.pool.Query(ctx,
 		`SELECT id, tenant_id, url, secret_ref, events, enabled

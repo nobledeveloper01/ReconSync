@@ -243,3 +243,15 @@ func TestCLIReportsMissingDatabaseURL(t *testing.T) {
 		}
 	}
 }
+
+// A typo in a scope would silently deny the key everything it was meant to do,
+// and the operator would debug the endpoint rather than the flag.
+func TestCLIKeysRejectsUnknownScopes(t *testing.T) {
+	_, stderr, code := runCtl(t, "keys", "create", "--tenant", "tnt_x", "--scopes", "endpoint:write")
+	if code == 0 {
+		t.Fatal("accepted a misspelled scope")
+	}
+	if !strings.Contains(stderr, "endpoints:write") {
+		t.Errorf("stderr = %q, want it to name the valid scopes", stderr)
+	}
+}
