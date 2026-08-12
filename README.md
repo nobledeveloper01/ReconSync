@@ -319,6 +319,50 @@ credential. A named variable that is unset refuses to start, because an empty
 credential would make every query fail, and every failure is `unknown` — which
 would silently stop all reversals.
 
+#### Settlement files, for the institutions with no API
+
+Most Nigerian banks will not give a fintech a status endpoint. Nearly all of them
+deliver a **settlement file** — a daily list of what actually settled, by SFTP or
+a portal download. That file is the institution's own record, which makes it
+better evidence than anything we could infer from silence, and it needs no
+relationship beyond the one the customer already has.
+
+```json
+[{
+  "name": "sterling",
+  "kind": "settlement",
+  "settlement": {
+    "dir": "/var/lib/reconsync/settlement/sterling",
+    "reference_column": "session_id",
+    "amount_column": "amount",
+    "settled_at_column": "settled_at",
+    "status_column": "status"
+  }
+}]
+```
+
+The whole difficulty is what a transaction's **absence** from a file means, and
+the answer is not one thing:
+
+| Situation | Outcome | Why |
+| --- | --- | --- |
+| Present, status settled | `settled` | Their own record confirms it |
+| Present, any other status | `failed` | Their own record denies it — the strongest evidence in the system |
+| Absent, no files at all | `unknown` | A misconfigured SFTP drop must not reverse everything it sees |
+| Absent, inside the grace period | `unknown` | A transaction near a file's cut-off is usually in tomorrow's delivery |
+| Absent, past the grace period | `not_found` | Covered by a file and missing from it |
+| Present, different amount | `unknown` | A partial, a fee or a reference collision — none of which we can resolve |
+
+The grace period defaults to 26 hours, deliberately longer than a daily cycle.
+Waiting produces a delayed reversal; guessing produces a wrong one, and only one
+of those takes money back off a customer who already received it.
+
+Coverage is derived from the timestamps **inside** the file rather than its name,
+because no two institutions name them the same way — and using the file's
+modification time would let a re-copied file silently extend its own coverage.
+Files are re-read when they change, so a delivery arriving mid-morning starts
+answering immediately rather than after the next deploy.
+
 ### `internal/evidence` — saying how sure we are
 
 A bare "orphaned" tells a receiver nothing about how much to trust it. The same
@@ -1103,6 +1147,7 @@ is delivered to the registered endpoint.
 | Provider scorecard — `GET /v1/reports/providers` | Done — per-deployment, not an industry benchmark |
 | Shadow mode — replay history, report exposure | Done |
 | Provider corroboration — ask the rail instead of inferring from silence | Done |
+| Settlement-file adapter — works for institutions with no API | Done |
 | Confidence score + evidence trail on every verdict | Done |
 | Audit hash chain + `GET /v1/audit/verify` | Done |
 | Reversal SLA compliance report (JSON + CSV) | Done |
