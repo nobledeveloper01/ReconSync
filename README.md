@@ -223,6 +223,29 @@ silent tenant is skipped entirely and one alert is raised instead of a thousand
 webhooks. Their transactions stay open and settle normally once the tenant
 recovers and sends the credits it owes.
 
+Suppressing detection *silently* would be the worst of both worlds — nothing is
+being watched and nobody has been told — so the tenant gets an
+`integration.silent` webhook, and an `integration.recovered` one when events
+resume. An alert that never clears trains people to ignore alerts.
+
+Three things make it usable rather than noise:
+
+- **Once per episode, not once per sweep.** A tenant that goes quiet at 2am must
+  not receive a webhook every five seconds until morning. The episode is claimed
+  with an `INSERT … ON CONFLICT DO NOTHING` against a table keyed by tenant, so
+  several replicas sweeping the same tenants produce exactly one alert between
+  them. The row is deleted on recovery, which both closes the episode and re-arms
+  it for the next one.
+- **Dated from their last event, not from when we noticed.** Telling a tenant
+  they went quiet "just now" after a three-hour outage would understate it by
+  three hours.
+- **It says what stopped.** `detection_suspended: true` is the part that costs
+  money — while the alert stands, none of their transactions are being judged.
+
+These two events concern the stream rather than a transaction, so they carry no
+transaction id. Inventing one to fit the usual payload shape would put a
+transaction that does not exist into the customer's delivery log.
+
 A tenant is only "silent" if it was *previously* active — ten or more minutes
 carrying events in the preceding hour. Without that baseline a genuinely
 low-volume tenant, or a brand new deployment with no history, would be mistaken
@@ -608,6 +631,28 @@ own bar: auto-reverse above a threshold, queue for a human below.
 `regulatory_deadline` is included so the receiver can prioritise by urgency
 without knowing our rules — it removes a whole category of integration question.
 
+Not every event is about a transaction. When a tenant's stream stops, the alert
+describes the integration instead:
+
+```json
+{
+  "event": "integration.silent",
+  "occurred_at": "2026-08-12T15:45:34Z",
+  "data": {
+    "tenant_id": "tnt_acme",
+    "reason": "no_events_received",
+    "silent_since": "2026-08-12T15:35:00Z",
+    "silent_for_seconds": 634,
+    "detection_suspended": true,
+    "advisory": true,
+    "actionable": "check that your transaction service can still reach ReconSync; reconciliation is paused until events resume"
+  }
+}
+```
+
+Because payloads come in more than one shape, a receiver should switch on
+`event` before decoding `data` — `cmd/reconsync-echo` shows the pattern.
+
 ---
 
 ## 5. API
@@ -809,6 +854,7 @@ is delivered to the registered endpoint.
 | `make demo` — one command to a verified webhook | Done |
 | Ingest-gap awareness — never reverse on our own blind spot | Done |
 | Silence suppression — never mass-reverse during a tenant outage | Done |
+| Silence alerting — `integration.silent` / `integration.recovered` | Done |
 | Provider corroboration — ask the rail instead of inferring from silence | Done |
 | Confidence score + evidence trail on every verdict | Done |
 | Audit hash chain + `GET /v1/audit/verify` | Done |

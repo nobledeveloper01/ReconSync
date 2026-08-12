@@ -62,10 +62,16 @@ db-setup: ## Create the local test database
 db-drop: ## Drop the local test database
 	@dropdb --if-exists $(TEST_DB)
 
-migrate-up: ## Apply migrations to TEST_DB
-	psql -q -v ON_ERROR_STOP=1 -d $(TEST_DB) -f $(MIGRATIONS)/0001_init.up.sql
+migrate-up: ## Apply every migration to TEST_DB, in order
+	@for f in $$(ls $(MIGRATIONS)/*.up.sql | sort); do \
+		echo "applying $$f"; \
+		psql -q -v ON_ERROR_STOP=1 -d $(TEST_DB) -f $$f || exit 1; \
+	done
 
-migrate-down: ## Roll migrations back on TEST_DB
-	psql -q -v ON_ERROR_STOP=1 -d $(TEST_DB) -f $(MIGRATIONS)/0001_init.down.sql
+migrate-down: ## Roll every migration back on TEST_DB, newest first
+	@for f in $$(ls $(MIGRATIONS)/*.down.sql | sort -r); do \
+		echo "reverting $$f"; \
+		psql -q -v ON_ERROR_STOP=1 -d $(TEST_DB) -f $$f || exit 1; \
+	done
 
 ci: fmt vet crosscheck lint test-integration ## What CI runs

@@ -262,6 +262,30 @@ type HealthStore interface {
 	// integration, not a quiet period — and nothing can be concluded about their
 	// individual transactions while it lasts.
 	SilentTenants(ctx context.Context, now time.Time, p SilenceParams) ([]string, error)
+
+	// SyncSilenceEpisodes reconciles the set of tenants currently silent against
+	// the open episodes, and reports only what changed.
+	//
+	// The alert has to fire once per episode, not once per sweep and not once
+	// per replica — a tenant that goes quiet at 2am must not produce a webhook
+	// every five seconds until morning. Ownership is settled in the database,
+	// so concurrent sweeps cannot both claim the same episode.
+	SyncSilenceEpisodes(ctx context.Context, silent []string, now time.Time) (SilenceChange, error)
+}
+
+// SilenceEpisode is one stretch of a tenant sending nothing.
+type SilenceEpisode struct {
+	TenantID    string
+	SilentSince time.Time
+}
+
+// SilenceChange is what one reconciliation moved.
+type SilenceChange struct {
+	// Opened are episodes this caller now owns and must alert on.
+	Opened []SilenceEpisode
+
+	// Recovered are episodes that ended because events resumed.
+	Recovered []SilenceEpisode
 }
 
 // SilenceParams defines what counts as anomalous silence.

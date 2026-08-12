@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,15 +44,25 @@ func main() {
 			return
 		}
 
-		var env webhook.Envelope
-		if err := json.Unmarshal(body, &env); err != nil {
+		// Events come in more than one shape — some concern a transaction,
+		// some the event stream itself — so this prints what actually arrived
+		// rather than forcing every payload through one struct and inventing
+		// zero values for the fields that do not apply.
+		var head struct {
+			Event string `json:"event"`
+		}
+		if err := json.Unmarshal(body, &head); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
 
-		pretty, _ := json.MarshalIndent(env, "  ", "  ")
-		fmt.Printf("\nVERIFIED  event=%s delivery=%s\n  %s\n", env.Event,
-			r.Header.Get(webhook.DeliveryHeader), pretty)
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, body, "  ", "  "); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		fmt.Printf("\nVERIFIED  event=%s delivery=%s\n  %s\n", head.Event,
+			r.Header.Get(webhook.DeliveryHeader), pretty.String())
 
 		// A real handler would now check its own ledger before moving money —
 		// the payload is marked advisory precisely because we cannot be trusted

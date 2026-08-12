@@ -57,7 +57,7 @@ func (p *Postgres) EnqueueDelivery(ctx context.Context, tenantID string, d *Pend
 		INSERT INTO webhook_deliveries (
 			tenant_id, endpoint_id, transaction_id, event_type, payload,
 			attempt, status, next_retry_at)
-		VALUES ($1, $2, $3, $4, $5, 0, 'pending', now())
+		VALUES ($1, $2, NULLIF($3, ''), $4, $5, 0, 'pending', now())
 		RETURNING id`,
 		tenantID, d.EndpointID, d.TransactionID, d.EventType, d.Payload).Scan(&id)
 	if err != nil {
@@ -92,7 +92,7 @@ func (p *Postgres) ClaimDueDeliveries(ctx context.Context, now time.Time, lease 
 			FOR UPDATE SKIP LOCKED
 			LIMIT $3
 		  )
-		RETURNING d.id, d.tenant_id, d.endpoint_id, d.transaction_id, d.event_type,
+		RETURNING d.id, d.tenant_id, d.endpoint_id, COALESCE(d.transaction_id, ''), d.event_type,
 		          d.payload, d.attempt, e.url, e.secret_ref`,
 		now, lease, limit)
 	if err != nil {
@@ -151,7 +151,7 @@ func (p *Postgres) ListDeliveries(ctx context.Context, tenantID, status string, 
 
 	// An empty status means "any", so the dashboard can show the whole log.
 	rows, err := p.pool.Query(ctx, `
-		SELECT id, tenant_id, endpoint_id, transaction_id, event_type, attempt,
+		SELECT id, tenant_id, endpoint_id, COALESCE(transaction_id, ''), event_type, attempt,
 		       status, response_code, response_body, duration_ms, next_retry_at, created_at
 		FROM webhook_deliveries
 		WHERE tenant_id = $1 AND ($2 = '' OR status = $2)

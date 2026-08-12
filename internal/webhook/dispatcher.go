@@ -111,7 +111,7 @@ func (s *Sender) Send(ctx context.Context, d Delivery) Result {
 }
 
 // Marshal renders an envelope for delivery.
-func Marshal(e Envelope) ([]byte, error) {
+func Marshal[T Envelope | IntegrationEnvelope](e T) ([]byte, error) {
 	raw, err := json.Marshal(e)
 	if err != nil {
 		return nil, fmt.Errorf("webhook: marshal envelope: %w", err)

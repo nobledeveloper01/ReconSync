@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/service"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
+	"github.com/nobledeveloper01/ReconSync/internal/webhook"
 )
 
 // busyThenSilent records a tenant sending steadily for an hour, then stopping.
@@ -99,6 +101,116 @@ func testSilenceCheckDisabled(t *testing.T, s store.Store) {
 	}
 }
 
+// The interlock: with several replicas sweeping the same tenants, exactly one
+// opens the episode and only that one alerts.
+func testSyncSilenceEpisodes(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	first, err := s.SyncSilenceEpisodes(ctx, []string{tenantA}, now)
+	if err != nil {
+		t.Fatalf("SyncSilenceEpisodes: %v", err)
+	}
+	if len(first.Opened) != 1 || first.Opened[0].TenantID != tenantA {
+		t.Fatalf("opened = %+v, want one episode for %s", first.Opened, tenantA)
+	}
+	if len(first.Recovered) != 0 {
+		t.Errorf("recovered = %+v on the first call", first.Recovered)
+	}
+
+	// A second sweep — or a second replica — must not claim it again.
+	second, err := s.SyncSilenceEpisodes(ctx, []string{tenantA}, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("SyncSilenceEpisodes: %v", err)
+	}
+	if len(second.Opened) != 0 {
+		t.Errorf("the same episode was opened twice: %+v", second.Opened)
+	}
+
+	// Events resume. The episode closes once, carrying the time it started.
+	recovered, err := s.SyncSilenceEpisodes(ctx, nil, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("SyncSilenceEpisodes: %v", err)
+	}
+	if len(recovered.Recovered) != 1 || recovered.Recovered[0].TenantID != tenantA {
+		t.Fatalf("recovered = %+v, want one episode for %s", recovered.Recovered, tenantA)
+	}
+	if !recovered.Recovered[0].SilentSince.Equal(now) {
+		t.Errorf("silent_since = %v, want the time the episode opened (%v)",
+			recovered.Recovered[0].SilentSince, now)
+	}
+
+	// Closing is idempotent, and the tenant is re-armed for the next episode.
+	again, err := s.SyncSilenceEpisodes(ctx, nil, now.Add(3*time.Minute))
+	if err != nil {
+		t.Fatalf("SyncSilenceEpisodes: %v", err)
+	}
+	if len(again.Recovered) != 0 {
+		t.Errorf("recovered twice: %+v", again.Recovered)
+	}
+	reopened, err := s.SyncSilenceEpisodes(ctx, []string{tenantA}, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SyncSilenceEpisodes: %v", err)
+	}
+	if len(reopened.Opened) != 1 {
+		t.Errorf("a tenant that broke twice was only alerted once: %+v", reopened.Opened)
+	}
+}
+
+// Telling a tenant they went quiet "just now" after a three-hour outage would
+// understate it by three hours, so the episode is dated from their last event.
+func testSilenceIsDatedFromTheLastEvent(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Minute)
+
+	lastEvent := now.Add(-3 * time.Hour)
+	if err := s.RecordIngestHealth(ctx, []store.IngestSample{
+		{TenantID: tenantA, Bucket: lastEvent, Received: 500},
+		{TenantID: tenantA, Bucket: lastEvent.Add(-time.Minute), Received: 500},
+	}); err != nil {
+		t.Fatalf("RecordIngestHealth: %v", err)
+	}
+
+	change, err := s.SyncSilenceEpisodes(ctx, []string{tenantA}, now)
+	if err != nil {
+		t.Fatalf("SyncSilenceEpisodes: %v", err)
+	}
+	if len(change.Opened) != 1 {
+		t.Fatalf("opened = %+v, want one episode", change.Opened)
+	}
+
+	// The minute after their last event is when the silence began.
+	want := lastEvent.Add(time.Minute)
+	if got := change.Opened[0].SilentSince.UTC(); !got.Equal(want) {
+		t.Errorf("silent_since = %v, want %v — the episode must be dated from their last event, not from when we noticed",
+			got, want)
+	}
+}
+
+// One tenant recovering must not close another's open episode.
+func testSilenceEpisodesAreIndependent(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if _, err := s.SyncSilenceEpisodes(ctx, []string{tenantA, tenantB}, now); err != nil {
+		t.Fatalf("SyncSilenceEpisodes: %v", err)
+	}
+
+	change, err := s.SyncSilenceEpisodes(ctx, []string{tenantA}, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("SyncSilenceEpisodes: %v", err)
+	}
+	if len(change.Recovered) != 1 || change.Recovered[0].TenantID != tenantB {
+		t.Fatalf("recovered = %+v, want only %s", change.Recovered, tenantB)
+	}
+	if len(change.Opened) != 0 {
+		t.Errorf("re-opened a still-silent tenant: %+v", change.Opened)
+	}
+}
+
 func testClaimExpiredSkipsTenants(t *testing.T, s store.Store) {
 	seedTenants(t, s)
 	ctx := context.Background()
@@ -167,8 +279,10 @@ func TestSilentTenantDoesNotGetMassReversed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListDeliveries: %v", err)
 	}
-	if len(deliveries) != 0 {
-		t.Fatalf("queued %d reversals into a tenant that is already down, want 0", len(deliveries))
+	for _, d := range deliveries {
+		if d.EventType != string(webhook.EventIntegrationSilent) {
+			t.Fatalf("queued %s into a tenant that is already down, want only the silence alert", d.EventType)
+		}
 	}
 
 	// Nothing was consumed: every transaction is still open and can settle when
@@ -219,6 +333,176 @@ func TestDetectionResumesWhenTheTenantRecovers(t *testing.T) {
 	}
 	if res.Claimed != 1 {
 		t.Errorf("claimed %d after recovery, want 1", res.Claimed)
+	}
+}
+
+// Suppressing detection without telling anyone is the worst of both worlds:
+// nothing is being watched and nobody knows.
+func TestSilentTenantIsAlerted(t *testing.T) {
+	s := store.NewMemory()
+	seedTenants(t, s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	newEndpoint(t, s, tenantA, "we_1", "https://customer.example.com/hook")
+
+	busyThenSilent(t, s, tenantA, now, 10*time.Minute)
+
+	d, err := service.NewDetector(s, service.DetectorOptions{})
+	if err != nil {
+		t.Fatalf("NewDetector: %v", err)
+	}
+	res, err := d.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.SilenceAlerts != 1 {
+		t.Fatalf("silence alerts = %d, want 1", res.SilenceAlerts)
+	}
+
+	due, err := s.ClaimDueDeliveries(ctx, time.Now().UTC(), time.Minute, 10)
+	if err != nil {
+		t.Fatalf("ClaimDueDeliveries: %v", err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("queued %d deliveries, want 1", len(due))
+	}
+	alert := due[0]
+	if alert.EventType != string(webhook.EventIntegrationSilent) {
+		t.Fatalf("event = %s, want %s", alert.EventType, webhook.EventIntegrationSilent)
+	}
+	// An event about the stream concerns no transaction, and inventing one
+	// would put a transaction that does not exist into their delivery log.
+	if alert.TransactionID != "" {
+		t.Errorf("transaction_id = %q, want empty for an integration event", alert.TransactionID)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(alert.Payload, &body); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	data, _ := body["data"].(map[string]any)
+	if data["advisory"] != true {
+		t.Error("silence alert is not marked advisory")
+	}
+	// The part that costs them money is that we stopped judging anything.
+	if data["detection_suspended"] != true {
+		t.Error("alert does not say detection is suspended")
+	}
+	if data["actionable"] == "" || data["actionable"] == nil {
+		t.Error("alert says nothing about what to do")
+	}
+}
+
+// A tenant that goes quiet at 2am must not receive a webhook every five seconds
+// until morning.
+func TestSilenceAlertsOncePerEpisode(t *testing.T) {
+	s := store.NewMemory()
+	seedTenants(t, s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	newEndpoint(t, s, tenantA, "we_1", "https://customer.example.com/hook")
+
+	busyThenSilent(t, s, tenantA, now, 10*time.Minute)
+
+	d, err := service.NewDetector(s, service.DetectorOptions{})
+	if err != nil {
+		t.Fatalf("NewDetector: %v", err)
+	}
+
+	total := 0
+	for i := 0; i < 20; i++ {
+		res, err := d.Sweep(ctx)
+		if err != nil {
+			t.Fatalf("sweep %d: %v", i, err)
+		}
+		total += res.SilenceAlerts
+	}
+	if total != 1 {
+		t.Fatalf("20 sweeps produced %d alerts, want 1", total)
+	}
+
+	deliveries, err := s.ListDeliveries(ctx, tenantA, "", 100)
+	if err != nil {
+		t.Fatalf("ListDeliveries: %v", err)
+	}
+	if len(deliveries) != 1 {
+		t.Errorf("queued %d deliveries for one episode, want 1", len(deliveries))
+	}
+}
+
+// An alert that never clears trains people to ignore alerts.
+func TestRecoveryClosesTheEpisodeAndRearmsIt(t *testing.T) {
+	s := store.NewMemory()
+	seedTenants(t, s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	newEndpoint(t, s, tenantA, "we_1", "https://customer.example.com/hook")
+
+	busyThenSilent(t, s, tenantA, now, 10*time.Minute)
+
+	clock := now
+	d, err := service.NewDetector(s, service.DetectorOptions{Now: func() time.Time { return clock }})
+	if err != nil {
+		t.Fatalf("NewDetector: %v", err)
+	}
+	if res, err := d.Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	} else if res.SilenceAlerts != 1 {
+		t.Fatalf("silence alerts = %d, want 1", res.SilenceAlerts)
+	}
+
+	// They come back.
+	if err := s.RecordIngestHealth(ctx, []store.IngestSample{
+		{TenantID: tenantA, Bucket: clock, Received: 400},
+	}); err != nil {
+		t.Fatalf("RecordIngestHealth: %v", err)
+	}
+
+	res, err := d.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("Sweep after recovery: %v", err)
+	}
+	if res.RecoveryAlerts != 1 {
+		t.Fatalf("recovery alerts = %d, want 1", res.RecoveryAlerts)
+	}
+
+	// And the all-clear is sent once, not on every subsequent sweep.
+	if res2, err := d.Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	} else if res2.RecoveryAlerts != 0 {
+		t.Errorf("recovery alerted again on the next sweep: %d", res2.RecoveryAlerts)
+	}
+
+	// The episode is re-armed: breaking again must alert again, rather than stay
+	// quiet because we already told them once.
+	clock = now.Add(2 * time.Hour)
+	busyThenSilent(t, s, tenantA, clock, 10*time.Minute)
+	if res3, err := d.Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	} else if res3.SilenceAlerts != 1 {
+		t.Errorf("second episode produced %d alerts, want 1", res3.SilenceAlerts)
+	}
+}
+
+// With the check disabled every tenant looks recovered, and closing the episodes
+// would fire an all-clear nobody earned.
+func TestDisabledSilenceCheckSendsNothing(t *testing.T) {
+	s := store.NewMemory()
+	seedTenants(t, s)
+	ctx := context.Background()
+	newEndpoint(t, s, tenantA, "we_1", "https://customer.example.com/hook")
+	busyThenSilent(t, s, tenantA, time.Now().UTC(), 10*time.Minute)
+
+	d, err := service.NewDetector(s, service.DetectorOptions{Silence: &store.SilenceParams{}})
+	if err != nil {
+		t.Fatalf("NewDetector: %v", err)
+	}
+	res, err := d.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.SilenceAlerts != 0 || res.RecoveryAlerts != 0 {
+		t.Errorf("disabled check still alerted: %+v", res)
 	}
 }
 

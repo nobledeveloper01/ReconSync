@@ -17,6 +17,13 @@ const (
 	EventTransactionSuspect EventType = "transaction.suspect"
 	EventTransactionSettled EventType = "transaction.reconciled"
 	EventSLAAtRisk          EventType = "sla.at_risk"
+
+	// These two concern the integration, not a transaction. A tenant that
+	// normally sends steadily and has gone quiet is not having a slow day —
+	// their pipe to us is broken, and nothing else in their stack is positioned
+	// to notice an absence.
+	EventIntegrationSilent    EventType = "integration.silent"
+	EventIntegrationRecovered EventType = "integration.recovered"
 )
 
 // Envelope is the body delivered to a customer endpoint.
@@ -74,6 +81,66 @@ func EnvelopeFor(event EventType, t *domain.Transaction, occurredAt time.Time, e
 			Advisory:           true,
 			Confidence:         ev.Confidence(),
 			Evidence:           ev.Signals(),
+		},
+	}
+}
+
+// IntegrationEnvelope is the body for an event about the stream itself. It has
+// no transaction, and inventing one to fit the transaction shape would put a
+// transaction that does not exist into the customer's delivery log.
+type IntegrationEnvelope struct {
+	Event      EventType       `json:"event"`
+	OccurredAt time.Time       `json:"occurred_at"`
+	Data       IntegrationData `json:"data"`
+}
+
+// IntegrationData describes a silence episode.
+type IntegrationData struct {
+	TenantID    string    `json:"tenant_id"`
+	Reason      string    `json:"reason"`
+	SilentSince time.Time `json:"silent_since"`
+	SilentFor   int       `json:"silent_for_seconds"`
+	Advisory    bool      `json:"advisory"`
+	Actionable  string    `json:"actionable"`
+
+	// DetectionSuspended is the part that costs money. While a tenant is
+	// silent we stop judging their transactions, because an absent credit
+	// proves nothing when every event is absent — so nothing is being watched
+	// until they fix it.
+	DetectionSuspended bool `json:"detection_suspended"`
+}
+
+// SilenceEnvelope builds the alert for a tenant that has stopped sending.
+func SilenceEnvelope(tenantID string, silentSince, occurredAt time.Time) IntegrationEnvelope {
+	return IntegrationEnvelope{
+		Event:      EventIntegrationSilent,
+		OccurredAt: occurredAt.UTC(),
+		Data: IntegrationData{
+			TenantID:           tenantID,
+			Reason:             "no_events_received",
+			SilentSince:        silentSince.UTC(),
+			SilentFor:          int(occurredAt.Sub(silentSince) / time.Second),
+			Advisory:           true,
+			DetectionSuspended: true,
+			Actionable:         "check that your transaction service can still reach ReconSync; reconciliation is paused until events resume",
+		},
+	}
+}
+
+// RecoveryEnvelope closes the episode, so a customer is never left wondering
+// whether an alert is still live.
+func RecoveryEnvelope(tenantID string, silentSince, occurredAt time.Time) IntegrationEnvelope {
+	return IntegrationEnvelope{
+		Event:      EventIntegrationRecovered,
+		OccurredAt: occurredAt.UTC(),
+		Data: IntegrationData{
+			TenantID:           tenantID,
+			Reason:             "events_resumed",
+			SilentSince:        silentSince.UTC(),
+			SilentFor:          int(occurredAt.Sub(silentSince) / time.Second),
+			Advisory:           true,
+			DetectionSuspended: false,
+			Actionable:         "reconciliation has resumed; transactions opened during the gap are being judged again",
 		},
 	}
 }

@@ -41,6 +41,9 @@ type Memory struct {
 	// ingest counters by tenant and minute
 	health map[healthKey]IngestSample
 
+	// open silence episodes by tenant
+	silence map[string]time.Time
+
 	// per-tenant audit chain, in sequence order
 	audit map[string][]audit.Record
 
@@ -63,6 +66,7 @@ func NewMemory() *Memory {
 		payloads:   make(map[int64][]byte),
 		rules:      make(map[string][]rules.Rule),
 		health:     make(map[healthKey]IngestSample),
+		silence:    make(map[string]time.Time),
 		audit:      make(map[string][]audit.Record),
 	}
 }

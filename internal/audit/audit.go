@@ -23,6 +23,11 @@ const (
 	EventReversalCompleted  = "reversal.completed"
 	EventReversalFailed     = "reversal.failed"
 	EventSettledByProvider  = "transaction.settled_by_provider"
+
+	// Detection stopping is itself an auditable event: "why did you not watch
+	// our transactions between 02:00 and 04:00" has to be answerable.
+	EventSilenceDetected = "integration.silent"
+	EventSilenceResolved = "integration.recovered"
 )
 
 // Record is one entry on a tenant's chain.

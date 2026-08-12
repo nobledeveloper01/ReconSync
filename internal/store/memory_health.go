@@ -88,6 +88,63 @@ func (m *Memory) SilentTenants(_ context.Context, now time.Time, params SilenceP
 	return out, nil
 }
 
+func (m *Memory) SyncSilenceEpisodes(_ context.Context, silent []string, now time.Time) (SilenceChange, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	stillSilent := make(map[string]struct{}, len(silent))
+	for _, id := range silent {
+		stillSilent[id] = struct{}{}
+	}
+
+	var out SilenceChange
+	for _, id := range silent {
+		if _, open := m.silence[id]; open {
+			continue // already alerted for this episode
+		}
+		since := m.silentSinceLocked(id, now.UTC())
+		m.silence[id] = since
+		out.Opened = append(out.Opened, SilenceEpisode{TenantID: id, SilentSince: since})
+	}
+
+	for id, since := range m.silence {
+		if _, ok := stillSilent[id]; ok {
+			continue
+		}
+		delete(m.silence, id)
+		out.Recovered = append(out.Recovered, SilenceEpisode{TenantID: id, SilentSince: since})
+	}
+
+	// Map iteration order is random; a caller comparing results across stores
+	// would otherwise see a difference that is not one.
+	sortEpisodes(out.Opened)
+	sortEpisodes(out.Recovered)
+	return out, nil
+}
+
+// silentSinceLocked is the minute after their last event — when they actually
+// stopped, not when the sweep noticed. Falls back to now when there is no
+// history to date it from.
+func (m *Memory) silentSinceLocked(tenantID string, now time.Time) time.Time {
+	var last time.Time
+	for key, v := range m.health {
+		if key.tenantID != tenantID || v.Received <= 0 {
+			continue
+		}
+		if key.bucket.After(last) {
+			last = key.bucket
+		}
+	}
+	if last.IsZero() {
+		return now
+	}
+	return last.Add(time.Minute)
+}
+
+func sortEpisodes(eps []SilenceEpisode) {
+	sort.Slice(eps, func(i, j int) bool { return eps[i].TenantID < eps[j].TenantID })
+}
+
 func (m *Memory) IngestActivity(_ context.Context, tenantID string, from, to time.Time) (IngestActivitySummary, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

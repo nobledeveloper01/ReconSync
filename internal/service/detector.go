@@ -130,6 +130,11 @@ type SweepResult struct {
 	// SilentTenants were skipped entirely because they have stopped sending.
 	SilentTenants []string
 
+	// SilenceAlerts and RecoveryAlerts are webhooks queued about the stream
+	// itself, one per episode rather than one per sweep.
+	SilenceAlerts  int
+	RecoveryAlerts int
+
 	// Corroboration outcomes, when a provider registry is configured.
 	Settled      int // the rail confirmed arrival, so no reversal was sent
 	Corroborated int // the rail confirmed failure, so the orphan has evidence
@@ -156,6 +161,12 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 		d.log.WarnContext(ctx, "tenant has stopped sending events; detection suppressed",
 			slog.String("tenant_id", tenantID),
 			slog.Duration("quiet_for_at_least", d.silence.Quiet))
+	}
+
+	// Suppressing detection silently would be the worst of both worlds: nothing
+	// is being watched and nobody has been told. Tell them.
+	if err := d.alertOnSilence(ctx, silent, now, &res); err != nil {
+		return res, err
 	}
 
 	var opts []store.ClaimOption
@@ -225,6 +236,108 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 	}
 
 	return res, nil
+}
+
+// alertOnSilence tells a tenant their stream has stopped, once per episode.
+//
+// The alert goes to the endpoint they registered, which may well be part of the
+// same system that has gone quiet. That is worth doing anyway: the failure is
+// usually one direction of one integration, not the whole stack, and the log
+// line plus the metric cover the case where it is not.
+//
+// A failure here is logged, never fatal. Losing an alert is bad; abandoning the
+// sweep — and with it every real orphan waiting to be detected — is worse.
+func (d *Detector) alertOnSilence(ctx context.Context, silent []string, now time.Time, res *SweepResult) error {
+	// With the check disabled every tenant looks recovered, and closing the
+	// episodes would fire an all-clear nobody earned.
+	if d.silence.Quiet <= 0 || d.silence.Baseline <= 0 || d.silence.MinActiveBuckets <= 0 {
+		return nil
+	}
+
+	change, err := d.store.SyncSilenceEpisodes(ctx, silent, now)
+	if err != nil {
+		return fmt.Errorf("sync silence episodes: %w", err)
+	}
+
+	for _, ep := range change.Opened {
+		env := webhook.SilenceEnvelope(ep.TenantID, ep.SilentSince, now)
+		if d.queueIntegrationAlert(ctx, ep.TenantID, env) {
+			res.SilenceAlerts++
+		}
+		d.recordSilence(ctx, audit.EventSilenceDetected, ep, now)
+	}
+
+	for _, ep := range change.Recovered {
+		env := webhook.RecoveryEnvelope(ep.TenantID, ep.SilentSince, now)
+		if d.queueIntegrationAlert(ctx, ep.TenantID, env) {
+			res.RecoveryAlerts++
+		}
+		d.log.InfoContext(ctx, "tenant is sending events again; detection resumed",
+			slog.String("tenant_id", ep.TenantID),
+			slog.Duration("silent_for", now.Sub(ep.SilentSince)))
+		d.recordSilence(ctx, audit.EventSilenceResolved, ep, now)
+	}
+	return nil
+}
+
+// queueIntegrationAlert delivers to every subscribed endpoint and reports
+// whether anything was queued.
+func (d *Detector) queueIntegrationAlert(ctx context.Context, tenantID string, env webhook.IntegrationEnvelope) bool {
+	payload, err := webhook.Marshal(env)
+	if err != nil {
+		d.log.ErrorContext(ctx, "could not build the integration alert",
+			slog.String("tenant_id", tenantID), slog.String("error", err.Error()))
+		return false
+	}
+
+	eps, err := d.store.ListEndpoints(ctx, tenantID)
+	if err != nil {
+		d.log.ErrorContext(ctx, "could not load endpoints for the integration alert",
+			slog.String("tenant_id", tenantID), slog.String("error", err.Error()))
+		return false
+	}
+
+	queued := false
+	for _, ep := range eps {
+		if !ep.Enabled || !subscribes(ep, env.Event) {
+			continue
+		}
+		// TransactionID is deliberately empty: this event is about the stream,
+		// not about any one transaction.
+		if _, err := d.store.EnqueueDelivery(ctx, tenantID, &store.PendingDelivery{
+			TenantID:   tenantID,
+			EndpointID: ep.ID,
+			EventType:  string(env.Event),
+			Payload:    payload,
+		}); err != nil {
+			d.log.ErrorContext(ctx, "could not queue the integration alert",
+				slog.String("tenant_id", tenantID),
+				slog.String("endpoint_id", ep.ID),
+				slog.String("error", err.Error()))
+			continue
+		}
+		queued = true
+	}
+	return queued
+}
+
+// recordSilence puts the episode on the audit chain. "Why did you stop watching
+// our transactions for two hours" is a question that must be answerable.
+func (d *Detector) recordSilence(ctx context.Context, event string, ep store.SilenceEpisode, now time.Time) {
+	if _, err := d.store.AppendAudit(ctx, ep.TenantID, &audit.Record{
+		EventType:  event,
+		OccurredAt: now.UTC(),
+		Actor:      map[string]any{"type": "system", "id": "detection-sweep"},
+		Subject:    map[string]any{"type": "tenant", "id": ep.TenantID},
+		Payload: map[string]any{
+			"silent_since":       ep.SilentSince.UTC(),
+			"silent_for_seconds": int(now.Sub(ep.SilentSince) / time.Second),
+			"quiet_threshold_s":  int(d.silence.Quiet / time.Second),
+		},
+	}); err != nil {
+		d.log.ErrorContext(ctx, "could not record the silence episode on the audit chain",
+			slog.String("tenant_id", ep.TenantID), slog.String("error", err.Error()))
+	}
 }
 
 // corroborate asks the rail what actually happened to a freshly claimed orphan

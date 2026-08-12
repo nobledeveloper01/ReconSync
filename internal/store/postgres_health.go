@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (p *Postgres) RecordIngestHealth(ctx context.Context, samples []IngestSample) error {
@@ -105,6 +107,95 @@ func (p *Postgres) SilentTenants(ctx context.Context, now time.Time, params Sile
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate silent tenants: %w", err)
+	}
+	return out, nil
+}
+
+// SyncSilenceEpisodes opens episodes for newly silent tenants and closes the
+// ones whose events have resumed.
+//
+// Both statements run in one transaction so a sweep never observes a tenant as
+// simultaneously silent and recovered. The INSERT ... ON CONFLICT DO NOTHING is
+// the interlock: with several replicas sweeping the same tenants, exactly one
+// insert succeeds and only that replica alerts.
+func (p *Postgres) SyncSilenceEpisodes(ctx context.Context, silent []string, now time.Time) (SilenceChange, error) {
+	var out SilenceChange
+
+	// A nil slice encodes as SQL NULL, and `tenant_id = ANY(NULL)` is NULL
+	// rather than false — which would silently close no episodes at exactly the
+	// moment every tenant has recovered.
+	if silent == nil {
+		silent = []string{}
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return out, fmt.Errorf("begin silence sync: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if len(silent) > 0 {
+		rows, err := tx.Query(ctx, `
+			WITH opened AS (
+				INSERT INTO tenant_silence (tenant_id, silent_since, notified_at)
+				-- silent_since is when they actually stopped, not when we
+				-- noticed. Telling a tenant they went quiet "just now" after a
+				-- three-hour outage would understate it by three hours.
+				SELECT t, COALESCE((
+					SELECT max(h.bucket) + interval '1 minute'
+					FROM ingest_health h
+					WHERE h.tenant_id = t AND h.received > 0
+				), $2::timestamptz), $2::timestamptz
+				FROM unnest($1::text[]) AS t
+				ON CONFLICT (tenant_id) DO NOTHING
+				RETURNING tenant_id, silent_since
+			)
+			SELECT tenant_id, silent_since FROM opened ORDER BY tenant_id`, silent, now.UTC())
+		if err != nil {
+			return out, fmt.Errorf("open silence episodes: %w", err)
+		}
+		out.Opened, err = scanEpisodes(rows)
+		if err != nil {
+			return out, err
+		}
+	}
+
+	// Deleting on recovery both closes the episode and re-arms the alert, so a
+	// tenant that breaks again tomorrow is told again.
+	rows, err := tx.Query(ctx, `
+		WITH closed AS (
+			DELETE FROM tenant_silence
+			WHERE NOT (tenant_id = ANY($1::text[]))
+			RETURNING tenant_id, silent_since
+		)
+		SELECT tenant_id, silent_since FROM closed ORDER BY tenant_id`, silent)
+	if err != nil {
+		return out, fmt.Errorf("close silence episodes: %w", err)
+	}
+	out.Recovered, err = scanEpisodes(rows)
+	if err != nil {
+		return out, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return SilenceChange{}, fmt.Errorf("commit silence sync: %w", err)
+	}
+	return out, nil
+}
+
+func scanEpisodes(rows pgx.Rows) ([]SilenceEpisode, error) {
+	defer rows.Close()
+
+	var out []SilenceEpisode
+	for rows.Next() {
+		var e SilenceEpisode
+		if err := rows.Scan(&e.TenantID, &e.SilentSince); err != nil {
+			return nil, fmt.Errorf("scan silence episode: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate silence episodes: %w", err)
 	}
 	return out, nil
 }
