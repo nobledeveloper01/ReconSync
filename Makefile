@@ -52,6 +52,10 @@ vuln: ## Scan for known vulnerabilities (§8.5)
 	@command -v govulncheck >/dev/null 2>&1 || go install golang.org/x/vuln/cmd/govulncheck@latest
 	govulncheck ./...
 
+secrets: ## Scan the whole history for committed secrets
+	@command -v gitleaks >/dev/null 2>&1 || go install github.com/zricethezav/gitleaks/v8@latest
+	gitleaks detect --redact --no-banner -v
+
 db-setup: ## Create the local test database
 	@createdb $(TEST_DB) 2>/dev/null || true
 

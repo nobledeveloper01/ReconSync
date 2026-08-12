@@ -61,7 +61,13 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
+      # Full history: gitleaks scans the commit range <first-pushed>^..<last>,
+      # and a shallow clone has no parent for the first commit, so git cannot
+      # resolve the range and the scan fails before it reads a single byte.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
