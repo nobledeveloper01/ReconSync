@@ -74,6 +74,16 @@ type SettlementOptions struct {
 	// transaction near the cut-off may simply be in tomorrow's.
 	Grace time.Duration
 
+	// RefreshInterval is how often the directory is checked for new files.
+	//
+	// It exists because a sweep asks about every orphan it claimed — up to 500
+	// — and checking the directory per question means a stat call per file per
+	// question. Against a year of daily files that is hundreds of thousands of
+	// syscalls every few seconds, on the one path the detection SLO is measured
+	// against. A settlement file that arrives is still picked up within this
+	// interval, which is the only freshness anyone needs from a daily delivery.
+	RefreshInterval time.Duration
+
 	Now func() time.Time
 }
 
@@ -93,13 +103,17 @@ type SettlementColumns struct {
 // already received it.
 const DefaultSettlementGrace = 26 * time.Hour
 
+// DefaultRefreshInterval bounds how often the directory is re-checked.
+const DefaultRefreshInterval = 5 * time.Second
+
 // SettlementProvider answers from settlement files.
 type SettlementProvider struct {
 	opts SettlementOptions
 
-	mu     sync.RWMutex
-	files  []SettlementFile
-	loaded map[string]time.Time // path to modtime, so unchanged files are not re-parsed
+	mu          sync.RWMutex
+	files       []SettlementFile
+	loaded      map[string]time.Time // path to modtime, so unchanged files are not re-parsed
+	lastChecked time.Time
 }
 
 // NewSettlementProvider builds the adapter and loads what is already on disk.
@@ -121,6 +135,11 @@ func NewSettlementProvider(opts SettlementOptions) (*SettlementProvider, error) 
 	}
 	if opts.Grace <= 0 {
 		opts.Grace = DefaultSettlementGrace
+	}
+	if opts.RefreshInterval < 0 {
+		opts.RefreshInterval = 0
+	} else if opts.RefreshInterval == 0 {
+		opts.RefreshInterval = DefaultRefreshInterval
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -186,8 +205,9 @@ func (p *SettlementProvider) Reload() error {
 // Query answers from the files on disk.
 func (p *SettlementProvider) Query(_ context.Context, ref Ref) (Status, error) {
 	// Picked up without a restart: a settlement file arriving mid-morning must
-	// start answering questions immediately, not after the next deploy.
-	if p.changed() {
+	// start answering questions within the refresh interval, not after the next
+	// deploy.
+	if p.dueForRefresh() && p.changed() {
 		if err := p.Reload(); err != nil {
 			return Status{Outcome: Unknown, Provider: p.opts.Name,
 				Detail: "settlement files could not be read"}, nil
@@ -278,6 +298,24 @@ func (p *SettlementProvider) latestCoverage() time.Time {
 		}
 	}
 	return latest
+}
+
+// dueForRefresh rate-limits the directory check, and records that it happened.
+//
+// Deliberately not exact under concurrency: two sweeps racing here cost one
+// extra directory listing, which is cheaper than serialising every query behind
+// a write lock to be precise about it.
+func (p *SettlementProvider) dueForRefresh() bool {
+	now := p.opts.Now()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.lastChecked.IsZero() && now.Sub(p.lastChecked) < p.opts.RefreshInterval {
+		return false
+	}
+	p.lastChecked = now
+	return true
 }
 
 // changed reports whether any file appeared, vanished or was rewritten.

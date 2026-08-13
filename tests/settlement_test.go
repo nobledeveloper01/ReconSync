@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,12 +145,28 @@ func TestSettlementRefusesToMatchOnAmountMismatch(t *testing.T) {
 	}
 }
 
-// A file arriving mid-morning must start answering immediately, not after the
-// next deploy.
+// A file arriving mid-morning must start answering within the refresh interval,
+// not after the next deploy.
 func TestSettlementPicksUpANewFileWithoutRestarting(t *testing.T) {
 	dir := settlementDir(t, map[string]string{"day1.csv": oneDayFile})
-	p := settlementProvider(t, dir, settleNow)
 	ctx := context.Background()
+
+	// A clock that advances, as a real one does. With a frozen clock the
+	// directory is checked once and never again, which is the rate limiting
+	// working rather than a bug.
+	clock := settleNow
+	p, err := provider.NewSettlementProvider(provider.SettlementOptions{
+		Name: "sterling",
+		Dir:  dir,
+		Columns: provider.SettlementColumns{
+			Reference: "session_id", Amount: "amount",
+			Currency: "currency", SettledAt: "settled_at", Status: "status",
+		},
+		Now: func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatalf("NewSettlementProvider: %v", err)
+	}
 
 	if got, _ := p.Query(ctx, provider.Ref{TransactionID: "TXN-LATE"}); got.Outcome == provider.Settled {
 		t.Fatal("a transaction settled before its file existed")
@@ -161,6 +178,14 @@ func TestSettlementPicksUpANewFileWithoutRestarting(t *testing.T) {
 		t.Fatalf("write day2: %v", err)
 	}
 
+	// Before the refresh interval elapses, the new file is not yet visible —
+	// which is the rate limiting that keeps a 500-orphan sweep from making a
+	// stat call per file per orphan.
+	if got, _ := p.Query(ctx, provider.Ref{TransactionID: "TXN-LATE", AmountMinor: 5_000_000}); got.Outcome == provider.Settled {
+		t.Error("the directory was re-read within the refresh interval")
+	}
+
+	clock = clock.Add(provider.DefaultRefreshInterval + time.Second)
 	got, err := p.Query(ctx, provider.Ref{TransactionID: "TXN-LATE", AmountMinor: 5_000_000})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
@@ -307,4 +332,59 @@ func TestSettlementRailLoadsFromConfig(t *testing.T) {
 	if _, err := provider.LoadRegistry(worse); err == nil || !strings.Contains(err.Error(), "carrier-pigeon") {
 		t.Errorf("unknown kind = %v, want it named", err)
 	}
+}
+
+// The detector queries per orphan while a delivery may land a new file. The
+// reload path takes the write lock that every query reads under, so it is worth
+// proving under the race detector rather than assuming.
+func TestSettlementIsSafeUnderConcurrentQueriesAndReloads(t *testing.T) {
+	dir := settlementDir(t, map[string]string{"day1.csv": oneDayFile})
+	clock := settleNow
+	var clockMu sync.Mutex
+	p, err := provider.NewSettlementProvider(provider.SettlementOptions{
+		Name: "sterling",
+		Dir:  dir,
+		Columns: provider.SettlementColumns{
+			Reference: "session_id", Amount: "amount",
+			Currency: "currency", SettledAt: "settled_at", Status: "status",
+		},
+		Now: func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			// Always due, so every query takes the reload path and the two
+			// contend for real.
+			clock = clock.Add(time.Minute)
+			return clock
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSettlementProvider: %v", err)
+	}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if _, err := p.Query(ctx, provider.Ref{TransactionID: "TXN-OK", AmountMinor: 5_000_000}); err != nil {
+					t.Errorf("Query: %v", err)
+					return
+				}
+			}
+		}(i)
+	}
+	// A delivery landing mid-sweep, which is when this actually happens.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 10; j++ {
+			name := filepath.Join(dir, "late"+strconv.Itoa(j)+".csv")
+			_ = os.WriteFile(name, []byte(
+				"session_id,amount,currency,settled_at,status\nTXN-"+strconv.Itoa(j)+
+					",5000000,NGN,2026-08-12T11:00:00Z,successful\n"), 0o600)
+		}
+	}()
+	wg.Wait()
 }

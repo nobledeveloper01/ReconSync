@@ -360,8 +360,13 @@ of those takes money back off a customer who already received it.
 Coverage is derived from the timestamps **inside** the file rather than its name,
 because no two institutions name them the same way — and using the file's
 modification time would let a re-copied file silently extend its own coverage.
+
 Files are re-read when they change, so a delivery arriving mid-morning starts
-answering immediately rather than after the next deploy.
+answering within seconds rather than after the next deploy — but the directory
+check is rate-limited to once every 5 seconds. A sweep asks about every orphan it
+claimed, up to 500, and checking per question meant a stat call per file per
+question: against a year of daily files, hundreds of thousands of syscalls every
+few seconds, on the one path the detection SLO is measured against.
 
 ### `internal/evidence` — saying how sure we are
 

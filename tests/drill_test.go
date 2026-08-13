@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -322,5 +323,64 @@ func TestDrillIDsAreUnique(t *testing.T) {
 			t.Fatalf("reused transaction id %s", rep.TransactionID)
 		}
 		seen[rep.TransactionID] = true
+	}
+}
+
+// The drill runs endpoints concurrently so the whole thing is bounded by the
+// slowest one. Every other test here has a single endpoint, which would not
+// exercise that at all.
+func TestDrillFansOutAcrossEndpoints(t *testing.T) {
+	s := store.NewMemory()
+	seedTenants(t, s)
+
+	var hits atomic.Int32
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		time.Sleep(150 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer slow.Close()
+
+	const endpoints = 5
+	for i := 0; i < endpoints; i++ {
+		newEndpoint(t, s, tenantA, fmt.Sprintf("we_%d", i), slow.URL)
+	}
+
+	runner, err := drill.New(drill.Options{
+		Store: s,
+		Sender: webhook.NewSender(webhook.SenderOptions{
+			Client: webhook.NewClient(webhook.TransportOptions{AllowPrivateAddresses: true}),
+		}),
+		Secrets: func(context.Context, string) (string, error) { return "whsec_test", nil },
+	})
+	if err != nil {
+		t.Fatalf("drill.New: %v", err)
+	}
+
+	started := time.Now()
+	rep, err := runner.Run(context.Background(), tenantA)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	elapsed := time.Since(started)
+
+	if rep.Endpoints != endpoints || rep.Passed != endpoints {
+		t.Fatalf("tested %d passed %d, want %d of each", rep.Endpoints, rep.Passed, endpoints)
+	}
+	if int(hits.Load()) != endpoints {
+		t.Errorf("receiver saw %d requests, want %d", hits.Load(), endpoints)
+	}
+	// Sequential would be 5 × 150ms. Generous bound: this asserts concurrency,
+	// not a latency budget.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("took %s for %d endpoints; they are not running concurrently", elapsed, endpoints)
+	}
+	// Every endpoint gets its own result, not five copies of one.
+	seen := map[string]bool{}
+	for _, res := range rep.Results {
+		if seen[res.EndpointID] {
+			t.Errorf("endpoint %s reported twice", res.EndpointID)
+		}
+		seen[res.EndpointID] = true
 	}
 }
