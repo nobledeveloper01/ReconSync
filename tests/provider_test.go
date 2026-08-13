@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -384,5 +385,145 @@ func TestHTTPProviderDetailDoesNotLeakResponseBody(t *testing.T) {
 		if strings.Contains(got.Detail, leaked) {
 			t.Errorf("detail leaked %q: %s", leaked, got.Detail)
 		}
+	}
+}
+
+// Paystack's transfer-verify response, as their public documentation gives it.
+//
+// This is not a claim that we have tested against Paystack — that needs a
+// sandbox account. It is a claim that the generic adapter handles the shape
+// their docs describe, which is what "the abstraction is proven" can honestly
+// mean without credentials.
+const paystackVerifyBody = `{
+  "status": true,
+  "message": "Transfer retrieved",
+  "data": {
+    "amount": 5000000,
+    "currency": "NGN",
+    "reference": "TXN-1",
+    "status": "success",
+    "transfer_code": "TRF_abc123",
+    "recipient": {"type": "nuban", "name": "Ada Lovelace"}
+  }
+}`
+
+func paystackConfig(t *testing.T, url string) *provider.HTTPProvider {
+	t.Helper()
+	p, err := provider.NewHTTP(provider.HTTPConfig{
+		ProviderName:   "paystack",
+		URLTemplate:    url + "/transfer/verify/{reference}",
+		AuthHeader:     "Authorization",
+		AuthValue:      "Bearer {value}",
+		AuthCredential: "sk_test_notreal",
+		StatusPath:     "data.status",
+		AmountPath:     "data.amount",
+		SettledValues:  []string{"success"},
+		FailedValues:   []string{"failed", "reversed", "abandoned"},
+	})
+	if err != nil {
+		t.Fatalf("NewHTTP: %v", err)
+	}
+	return p
+}
+
+func TestHTTPAdapterHandlesPaystackShape(t *testing.T) {
+	var gotAuth, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(paystackVerifyBody))
+	}))
+	defer srv.Close()
+
+	got, err := paystackConfig(t, srv.URL).Query(context.Background(), provider.Ref{
+		TransactionID: "TXN-1", AmountMinor: 5_000_000, Currency: "NGN",
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got.Outcome != provider.Settled {
+		t.Errorf("outcome = %s, want settled: %s", got.Outcome, got.Detail)
+	}
+
+	// The credential is rendered into the scheme the rail expects. An operator
+	// storing a bare key would otherwise get 401 on every query — which is
+	// Unknown, which silently stops every reversal.
+	if gotAuth != "Bearer sk_test_notreal" {
+		t.Errorf("Authorization = %q, want the templated bearer token", gotAuth)
+	}
+	if gotPath != "/transfer/verify/TXN-1" {
+		t.Errorf("path = %q, want the reference substituted", gotPath)
+	}
+}
+
+// A settled response for a different amount is not this transaction settling,
+// and believing it would cancel a reversal that should have happened.
+func TestHTTPAdapterChecksTheAmount(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(paystackVerifyBody))
+	}))
+	defer srv.Close()
+
+	got, err := paystackConfig(t, srv.URL).Query(context.Background(), provider.Ref{
+		TransactionID: "TXN-1", AmountMinor: 9_999_999,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got.Outcome != provider.Unknown {
+		t.Fatalf("outcome = %s, want unknown on an amount mismatch", got.Outcome)
+	}
+	if !strings.Contains(got.Detail, "5000000") {
+		t.Errorf("detail = %q, want both amounts named", got.Detail)
+	}
+}
+
+// Paystack's in-flight statuses must not be read as a verdict either way.
+func TestHTTPAdapterTreatsPendingAsUnknown(t *testing.T) {
+	for _, status := range []string{"pending", "otp", "processing", "something_new"} {
+		t.Run(status, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprintf(w, `{"data":{"status":%q,"amount":5000000}}`, status)
+			}))
+			defer srv.Close()
+
+			got, err := paystackConfig(t, srv.URL).Query(context.Background(), provider.Ref{
+				TransactionID: "TXN-1", AmountMinor: 5_000_000,
+			})
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if got.Outcome != provider.Unknown {
+				t.Errorf("%s = %s, want unknown", status, got.Outcome)
+			}
+		})
+	}
+}
+
+// An auth value with no template keeps working exactly as before.
+func TestHTTPAdapterAuthWithoutATemplate(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("X-Api-Key")
+		_, _ = w.Write([]byte(`{"data":{"status":"success"}}`))
+	}))
+	defer srv.Close()
+
+	p, err := provider.NewHTTP(provider.HTTPConfig{
+		ProviderName:  "bank",
+		URLTemplate:   srv.URL + "/status/{reference}",
+		AuthHeader:    "X-Api-Key",
+		AuthValue:     "raw-key-verbatim",
+		StatusPath:    "data.status",
+		SettledValues: []string{"success"},
+	})
+	if err != nil {
+		t.Fatalf("NewHTTP: %v", err)
+	}
+	if _, err := p.Query(context.Background(), provider.Ref{TransactionID: "TXN-1"}); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if gotAuth != "raw-key-verbatim" {
+		t.Errorf("X-Api-Key = %q, want the value verbatim", gotAuth)
 	}
 }

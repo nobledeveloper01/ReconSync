@@ -306,12 +306,32 @@ config file the sweep behaves exactly as it did before this existed.
   "name": "paystack",
   "url_template": "https://api.paystack.co/transfer/verify/{reference}",
   "auth_header": "Authorization",
+  "auth_value": "Bearer {value}",
   "auth_value_env": "PAYSTACK_SECRET_KEY",
   "status_path": "data.status",
+  "amount_path": "data.amount",
   "settled_values": ["success"],
-  "failed_values": ["failed", "reversed"]
+  "failed_values": ["failed", "reversed", "abandoned"]
 }]
 ```
+
+Two fields there are load-bearing beyond what they look like.
+
+`auth_value` is a **template**: `{value}` is replaced with the contents of
+`PAYSTACK_SECRET_KEY`. Nearly every rail wants `Bearer sk_live_...` while a
+secret manager holds `sk_live_...`, and an operator who stores the bare key
+gets `401` on every query — which is `unknown`, which silently stops every
+reversal. Making the scheme configuration rather than a property of how the
+secret was stored removes a trap whose failure mode is invisible.
+
+`amount_path` makes a settled response for a **different amount** come back
+`unknown` instead of `settled`. The settlement-file adapter always checked this;
+without it here, a reference collision or a partial settlement would read as
+"the money arrived" and cancel a reversal that should have happened.
+
+The adapter is tested against Paystack's documented response shape. That is not
+the same as testing against Paystack — a live sandbox needs an account — and the
+distinction is worth keeping: the shape is verified, the integration is not.
 
 The config names the environment variable holding the key rather than the key
 itself, so the file can be committed and reviewed without carrying a live

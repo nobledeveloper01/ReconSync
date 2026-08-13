@@ -22,10 +22,16 @@ type FileConfig struct {
 	// second is the one that works everywhere.
 	Kind string `json:"kind,omitempty"`
 
-	URLTemplate   string   `json:"url_template,omitempty"`
-	AuthHeader    string   `json:"auth_header,omitempty"`
-	AuthValueEnv  string   `json:"auth_value_env,omitempty"`
+	URLTemplate  string `json:"url_template,omitempty"`
+	AuthHeader   string `json:"auth_header,omitempty"`
+	AuthValueEnv string `json:"auth_value_env,omitempty"`
+
+	// AuthValue is the header template, e.g. "Bearer {value}". {value} is
+	// replaced with the contents of AuthValueEnv. Defaults to the credential
+	// alone, which is what a rail wanting a bare key expects.
+	AuthValue     string   `json:"auth_value,omitempty"`
 	StatusPath    string   `json:"status_path,omitempty"`
+	AmountPath    string   `json:"amount_path,omitempty"`
 	SettledValues []string `json:"settled_values,omitempty"`
 	FailedValues  []string `json:"failed_values,omitempty"`
 	TimeoutMS     int      `json:"timeout_ms,omitempty"`
@@ -103,14 +109,16 @@ func LoadRegistry(path string) (*Registry, error) {
 		}
 
 		p, err := NewHTTP(HTTPConfig{
-			ProviderName:  e.Name,
-			URLTemplate:   e.URLTemplate,
-			AuthHeader:    e.AuthHeader,
-			AuthValue:     authValue,
-			StatusPath:    e.StatusPath,
-			SettledValues: e.SettledValues,
-			FailedValues:  e.FailedValues,
-			Timeout:       msToDuration(e.TimeoutMS),
+			ProviderName:   e.Name,
+			URLTemplate:    e.URLTemplate,
+			AuthHeader:     e.AuthHeader,
+			AuthValue:      authTemplate(e.AuthValue),
+			AuthCredential: authValue,
+			StatusPath:     e.StatusPath,
+			AmountPath:     e.AmountPath,
+			SettledValues:  e.SettledValues,
+			FailedValues:   e.FailedValues,
+			Timeout:        msToDuration(e.TimeoutMS),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("provider: entry %d (%s): %w", i, e.Name, err)
@@ -120,6 +128,14 @@ func LoadRegistry(path string) (*Registry, error) {
 		}
 	}
 	return reg, nil
+}
+
+// authTemplate defaults to the bare credential when no template is configured.
+func authTemplate(configured string) string {
+	if configured == "" {
+		return "{value}"
+	}
+	return configured
 }
 
 func settlementFrom(e FileConfig) (*SettlementProvider, error) {

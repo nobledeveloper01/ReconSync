@@ -30,10 +30,19 @@ type HTTPConfig struct {
 	// provider reference, or the transaction id when there is none.
 	URLTemplate string
 
-	// AuthHeader and AuthValue are sent on every request, e.g.
-	// "Authorization: Bearer sk_live_...".
+	// AuthHeader and AuthValue are sent on every request.
+	//
+	// AuthValue may contain {value}, which is replaced with the credential.
+	// That exists because nearly every rail wants "Bearer sk_live_..." while
+	// the secret manager holds "sk_live_...", and an operator who stores the
+	// raw key without the prefix gets 401 on every query — which is Unknown,
+	// which silently stops every reversal. A template makes the prefix
+	// configuration rather than a trap in how the secret was stored.
 	AuthHeader string
 	AuthValue  string
+
+	// AuthCredential is the secret substituted into AuthValue's {value}.
+	AuthCredential string
 
 	// StatusPath is a dotted path to the status field, e.g. "data.status".
 	StatusPath string
@@ -42,6 +51,14 @@ type HTTPConfig struct {
 	// is case-insensitive. Anything unmatched is Unknown — never a guess.
 	SettledValues []string
 	FailedValues  []string
+
+	// AmountPath is a dotted path to the amount, in minor units. Optional.
+	//
+	// When set, a settled response whose amount disagrees with ours is Unknown
+	// rather than Settled. The settlement-file adapter has always checked this;
+	// without it here, a reference collision or a partial settlement would read
+	// as "the money arrived" and cancel a reversal that should have happened.
+	AmountPath string
 
 	Timeout time.Duration
 	Client  *http.Client
@@ -122,7 +139,7 @@ func (p *HTTPProvider) Query(ctx context.Context, ref Ref) (Status, error) {
 	}
 	req.Header.Set("Accept", "application/json")
 	if p.cfg.AuthHeader != "" {
-		req.Header.Set(p.cfg.AuthHeader, p.cfg.AuthValue)
+		req.Header.Set(p.cfg.AuthHeader, p.authValue())
 	}
 
 	resp, err := p.client.Do(req)
@@ -175,6 +192,13 @@ func (p *HTTPProvider) Query(ctx context.Context, ref Ref) (Status, error) {
 
 	switch {
 	case contains(p.settled, normalised):
+		// Checked before believing the good news: a settled response for a
+		// different amount is not this transaction settling.
+		if detail, ok := p.amountDisagrees(decoded, ref); ok {
+			status.Outcome = Unknown
+			status.Detail = detail
+			break
+		}
 		status.Outcome = Settled
 		status.Detail = "provider reports settled"
 	case contains(p.failed, normalised):
@@ -187,6 +211,45 @@ func (p *HTTPProvider) Query(ctx context.Context, ref Ref) (Status, error) {
 		status.Detail = "unrecognised provider status"
 	}
 	return status, nil
+}
+
+// authValue renders the credential into the configured template.
+func (p *HTTPProvider) authValue() string {
+	if strings.Contains(p.cfg.AuthValue, "{value}") {
+		return strings.ReplaceAll(p.cfg.AuthValue, "{value}", p.cfg.AuthCredential)
+	}
+	// No template: the configured value is used verbatim, which is what every
+	// existing config does.
+	return p.cfg.AuthValue
+}
+
+// amountDisagrees reports whether the provider's amount contradicts ours.
+//
+// Silent when either side is unknown: a missing or unparseable amount must not
+// turn a real settlement into an investigation, because the cost of that is a
+// reversal we should not send.
+func (p *HTTPProvider) amountDisagrees(decoded map[string]any, ref Ref) (string, bool) {
+	if p.cfg.AmountPath == "" || ref.AmountMinor <= 0 {
+		return "", false
+	}
+	raw, ok := lookup(decoded, p.cfg.AmountPath)
+	if !ok {
+		return "", false
+	}
+
+	var got int64
+	switch v := raw.(type) {
+	case float64:
+		got = int64(v)
+	case string:
+		got = parseMinor(v)
+	default:
+		return "", false
+	}
+	if got <= 0 || got == ref.AmountMinor {
+		return "", false
+	}
+	return fmt.Sprintf("provider reports %d settled, we recorded %d", got, ref.AmountMinor), true
 }
 
 func contains(set map[string]struct{}, v string) bool {
