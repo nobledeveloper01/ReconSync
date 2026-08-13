@@ -66,6 +66,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"LowVolumeTenantIsNotSilent", testLowVolumeTenantIsNotSilent},
 		{"SilenceCheckDisabled", testSilenceCheckDisabled},
 		{"ClaimExpiredSkipsTenants", testClaimExpiredSkipsTenants},
+		{"ClaimSLAAtRisk", testClaimSLAAtRisk},
 		{"SyncSilenceEpisodes", testSyncSilenceEpisodes},
 		{"SilenceIsDatedFromTheLastEvent", testSilenceIsDatedFromTheLastEvent},
 		{"SilenceEpisodesAreIndependent", testSilenceEpisodesAreIndependent},

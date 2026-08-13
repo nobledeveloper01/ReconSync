@@ -544,3 +544,34 @@ func readAll(r *http.Request) ([]byte, error) {
 	defer func() { _ = r.Body.Close() }()
 	return io.ReadAll(r.Body)
 }
+
+// A payload carrying "…+01:00" beside "…Z" is a side-by-side comparison a
+// reader gets wrong, and a receiver comparing strings rather than parsing gets
+// wrong too. Timestamps from the database arrive in the server's local zone.
+func TestEnvelopeTimestampsAreAllUTC(t *testing.T) {
+	lagos := time.FixedZone("WAT", 1*60*60)
+	debitAt := time.Date(2026, 8, 13, 11, 0, 2, 0, lagos)
+	detected := debitAt.Add(5 * time.Second)
+
+	env := webhook.EnvelopeFor(webhook.EventReversalTriggered, &domain.Transaction{
+		TransactionID:        "TXN-1",
+		AmountMinor:          5_000_000,
+		Currency:             "NGN",
+		DebitAt:              debitAt,
+		ExpectedCompletionAt: debitAt.Add(time.Minute),
+		DetectedAt:           &detected,
+	}, debitAt.Add(time.Minute), nil)
+
+	raw, err := webhook.Marshal(env)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, field := range []string{"debit_at", "regulatory_deadline", "detected_at", "occurred_at"} {
+		if !strings.Contains(string(raw), field) {
+			t.Fatalf("payload has no %s: %s", field, raw)
+		}
+	}
+	if strings.Contains(string(raw), "+01:00") {
+		t.Errorf("payload carries a local-zone timestamp: %s", raw)
+	}
+}

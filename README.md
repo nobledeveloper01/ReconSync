@@ -739,6 +739,47 @@ An unknown event name is rejected rather than stored: an endpoint subscribed to
 `reversal.triggerd` would sit there delivering nothing, which is a worse outcome
 than a `400`.
 
+#### Warning before the breach, not just reporting it
+
+The compliance report scores a breach after the fact. `sla.at_risk` is the same
+information while there is still time to act: a webhook fired when a transaction
+is approaching its regulatory deadline with the customer's money still out.
+
+```json
+{
+  "event": "sla.at_risk",
+  "data": {
+    "transaction_id": "TXN-1",
+    "reason": "approaching_reversal_deadline",
+    "seconds_until_breach": 10800,
+    "regulatory_deadline": "2026-08-14T09:00:00Z",
+    "advisory": true
+  }
+}
+```
+
+Four decisions hold it together:
+
+- **It warns about exactly the population the report scores.** `orphaned`,
+  `reversal_pending`, `reversal_failed` and `suspect` — the same set the exposure
+  report counts. An alert that fired for a different set than the report scores
+  would be worse than none, because it would train people to ignore it.
+- **The clock runs from the debit**, not from when we detected anything. Timing
+  it from detection would let a late detection quietly extend a regulatory
+  deadline.
+- **Once per transaction.** The mark and the claim happen in one statement, so
+  it is exactly-once across replicas and survives a restart. A sweep runs every
+  five seconds; warning on each one would be seventeen thousand webhooks before
+  the deadline arrived.
+- **No confidence score.** This is not a verdict about whether the transfer
+  failed, it is a statement about the clock, and carrying a number would invite a
+  receiver to treat it as one.
+
+Replayed history never warns — shadow mode would otherwise fire a webhook for
+every failure in the last 90 days. `RECONSYNC_SLA_WARN_BEFORE_SECONDS` set
+negative disables it, because a deployment that does not want the event should
+not have to filter it at the receiver.
+
 #### Metrics, and the one to alert on
 
 `/metrics` is Prometheus text format written by hand, so the binary carries no
@@ -760,6 +801,7 @@ reconsync_reversals_queued_total
 reconsync_suspect_total
 reconsync_orphans_without_endpoint_total
 reconsync_settled_by_rail_total
+reconsync_sla_at_risk_total
 reconsync_silent_tenants
 reconsync_deliveries_{delivered,retrying,dead_lettered}_total
 ```
@@ -1151,6 +1193,8 @@ and asserts every row is claimed exactly once.
 | `RECONSYNC_ADDR` | no | `:8080` | Listen address |
 | `RECONSYNC_DRAIN_TIMEOUT_SECONDS` | no | `20` | Graceful shutdown budget |
 | `RECONSYNC_PROVIDERS_FILE` | no | — | Rail status adapters. Unset disables corroboration entirely |
+| `RECONSYNC_REVERSAL_DEADLINE_SECONDS` | no | `86400` | The regulatory clock, from the debit. Used by `sla.at_risk` |
+| `RECONSYNC_SLA_WARN_BEFORE_SECONDS` | no | `14400` | How much notice `sla.at_risk` gives. Negative disables it |
 | `RECONSYNC_CHECKPOINT_KEY` | no | — | Ed25519 key signing audit chain heads. Unset means a wholesale rewrite is undetectable, and `/v1/audit/verify` says so |
 | `RECONSYNC_CHECKPOINT_INTERVAL_SECONDS` | no | `3600` | How often heads are signed. The interval is the window an attacker can rewrite undetected |
 | `RECONSYNC_ALLOW_PRIVATE_WEBHOOK_TARGETS` | no | `false` | **Local development only.** Disables the SSRF guard so webhooks can reach loopback. |

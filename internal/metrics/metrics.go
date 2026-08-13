@@ -30,6 +30,7 @@ type Registry struct {
 	suspect        atomic.Uint64
 	noTarget       atomic.Uint64
 	settledByRail  atomic.Uint64
+	atRisk         atomic.Uint64
 	silentTenants  atomic.Int64
 
 	// Dispatch.
@@ -54,6 +55,7 @@ type SweepResult struct {
 	Suspect       int
 	NoTarget      int
 	SettledByRail int
+	AtRisk        int
 	SilentTenants int
 	Lag           time.Duration
 }
@@ -69,6 +71,7 @@ func (r *Registry) RecordSweep(at time.Time, res SweepResult) {
 	r.suspect.Add(nonNegative(res.Suspect))
 	r.noTarget.Add(nonNegative(res.NoTarget))
 	r.settledByRail.Add(nonNegative(res.SettledByRail))
+	r.atRisk.Add(nonNegative(res.AtRisk))
 	r.silentTenants.Store(int64(res.SilentTenants))
 
 	r.mu.Lock()
@@ -126,6 +129,7 @@ type Snapshot struct {
 	Suspect               uint64
 	NoTarget              uint64
 	SettledByRail         uint64
+	AtRisk                uint64
 	SilentTenants         int64
 	Delivered             uint64
 	Retried               uint64
@@ -158,6 +162,7 @@ func (r *Registry) Read(now time.Time) Snapshot {
 		Suspect:         r.suspect.Load(),
 		NoTarget:        r.noTarget.Load(),
 		SettledByRail:   r.settledByRail.Load(),
+		AtRisk:          r.atRisk.Load(),
 		SilentTenants:   r.silentTenants.Load(),
 		Delivered:       r.delivered.Load(),
 		Retried:         r.retried.Load(),

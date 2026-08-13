@@ -65,6 +65,11 @@ type Transaction struct {
 	Metadata   map[string]any
 	IsBackfill bool
 
+	// SLAWarnedAt is when we warned that this transaction was approaching its
+	// regulatory deadline. Nil means never warned, which is what stops the
+	// warning repeating on every sweep.
+	SLAWarnedAt *time.Time
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

@@ -40,6 +40,18 @@ const (
 	DefaultMinActiveBuckets = 10
 )
 
+// Defaults for the deadline warning.
+//
+// The deadline mirrors the compliance report's, because the warning and the
+// report must describe the same thing: one says a breach is coming, the other
+// scores it once it has. A warning that fired on a different clock than the
+// report scores would be worse than none, because it would train people to
+// ignore it.
+const (
+	DefaultReversalDeadline = 24 * time.Hour
+	DefaultSLAWarnBefore    = 4 * time.Hour
+)
+
 // Detector sweeps for transactions whose reconciliation window has closed and
 // queues the reversal webhook.
 type Detector struct {
@@ -51,6 +63,9 @@ type Detector struct {
 	silence   store.SilenceParams
 	providers *provider.Registry
 	metrics   *metrics.Registry
+
+	deadline     time.Duration
+	slaWarnAhead time.Duration
 }
 
 // DetectorOptions configures a Detector.
@@ -66,6 +81,12 @@ type DetectorOptions struct {
 
 	// Metrics records what each sweep did. Optional; nil records nothing.
 	Metrics *metrics.Registry
+
+	// ReversalDeadline is the regulatory clock, measured from the debit.
+	// SLAWarnBefore is how long before it the sla.at_risk webhook fires.
+	// A zero SLAWarnBefore disables the warning entirely.
+	ReversalDeadline time.Duration
+	SLAWarnBefore    time.Duration
 
 	// Providers corroborates an orphan against the rail before any reversal is
 	// queued. Optional, and opt-in for a reason: with no adapter registered
@@ -94,6 +115,14 @@ func NewDetector(s store.Store, opts DetectorOptions) (*Detector, error) {
 	}
 	d.providers = opts.Providers
 	d.metrics = opts.Metrics
+	d.deadline = opts.ReversalDeadline
+	if d.deadline <= 0 {
+		d.deadline = DefaultReversalDeadline
+	}
+	d.slaWarnAhead = opts.SLAWarnBefore
+	if d.slaWarnAhead == 0 {
+		d.slaWarnAhead = DefaultSLAWarnBefore
+	}
 	if opts.Silence != nil {
 		d.silence = *opts.Silence
 	} else {
@@ -142,6 +171,9 @@ type SweepResult struct {
 	// itself, one per episode rather than one per sweep.
 	SilenceAlerts  int
 	RecoveryAlerts int
+
+	// AtRisk is transactions warned about before their deadline.
+	AtRisk int
 
 	// Corroboration outcomes, when a provider registry is configured.
 	Settled      int // the rail confirmed arrival, so no reversal was sent
@@ -243,6 +275,13 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 		res.Queued += queued
 	}
 
+	// Warn about what will breach if nothing changes. After the claims above,
+	// so a transaction detected this very sweep can be warned about in the same
+	// pass rather than waiting for the next one.
+	if err := d.warnAtRisk(ctx, now, &res); err != nil {
+		return res, err
+	}
+
 	// Lag is how far past its deadline the oldest thing we just claimed was.
 	// It answers the only question the SLO asks — how long a failed transfer
 	// went unnoticed — where a sweep counter only says the loop is turning.
@@ -258,10 +297,68 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 		Suspect:       res.Suspect,
 		NoTarget:      res.NoTarget,
 		SettledByRail: res.Settled,
+		AtRisk:        res.AtRisk,
 		SilentTenants: len(res.SilentTenants),
 		Lag:           lag,
 	})
 	return res, nil
+}
+
+// warnAtRisk fires sla.at_risk for transactions approaching their deadline.
+//
+// The claim marks and returns in one statement, so the warning is exactly once
+// across replicas and never repeats on later sweeps. A failure here is returned
+// rather than swallowed: unlike the silence alert, this is the last warning
+// before a regulatory breach, and quietly losing it is not a trade worth making.
+func (d *Detector) warnAtRisk(ctx context.Context, now time.Time, res *SweepResult) error {
+	if d.slaWarnAhead <= 0 {
+		return nil
+	}
+
+	atRisk, err := d.store.ClaimSLAAtRisk(ctx, now, d.deadline, d.slaWarnAhead, d.batch)
+	if err != nil {
+		return fmt.Errorf("claim transactions at risk: %w", err)
+	}
+
+	endpoints := map[string][]*store.WebhookEndpoint{}
+	for _, txn := range atRisk {
+		eps, ok := endpoints[txn.TenantID]
+		if !ok {
+			if eps, err = d.store.ListEndpoints(ctx, txn.TenantID); err != nil {
+				return err
+			}
+			endpoints[txn.TenantID] = eps
+		}
+
+		deadlineAt := txn.DebitAt.Add(d.deadline)
+		payload, err := webhook.Marshal(webhook.AtRiskEnvelope(txn, deadlineAt, now))
+		if err != nil {
+			return err
+		}
+
+		for _, ep := range eps {
+			if !ep.Enabled || !subscribes(ep, webhook.EventSLAAtRisk) {
+				continue
+			}
+			if _, err := d.store.EnqueueDelivery(ctx, txn.TenantID, &store.PendingDelivery{
+				TenantID:      txn.TenantID,
+				EndpointID:    ep.ID,
+				TransactionID: txn.TransactionID,
+				EventType:     string(webhook.EventSLAAtRisk),
+				Payload:       payload,
+			}); err != nil {
+				return err
+			}
+		}
+		res.AtRisk++
+
+		d.log.WarnContext(ctx, "transaction is approaching its reversal deadline",
+			slog.String("tenant_id", txn.TenantID),
+			slog.String("transaction_id", txn.TransactionID),
+			slog.String("status", txn.Status.String()),
+			slog.Duration("remaining", deadlineAt.Sub(now)))
+	}
+	return nil
 }
 
 // alertOnSilence tells a tenant their stream has stopped, once per episode.

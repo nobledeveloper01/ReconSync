@@ -929,6 +929,7 @@ func (s *Server) writeLoopMetrics(out *strings.Builder) {
 		{"reconsync_suspect_total", "Transactions raised for investigation.", "counter", snap.Suspect},
 		{"reconsync_orphans_without_endpoint_total", "Orphans with no enabled endpoint to notify.", "counter", snap.NoTarget},
 		{"reconsync_settled_by_rail_total", "Orphans the rail confirmed had settled.", "counter", snap.SettledByRail},
+		{"reconsync_sla_at_risk_total", "Transactions warned about before their reversal deadline.", "counter", snap.AtRisk},
 		{"reconsync_deliveries_delivered_total", "Webhook deliveries accepted.", "counter", snap.Delivered},
 		{"reconsync_deliveries_retrying_total", "Webhook deliveries scheduled for retry.", "counter", snap.Retried},
 		{"reconsync_deliveries_dead_lettered_total", "Webhook deliveries that exhausted retries.", "counter", snap.DeadLettered},

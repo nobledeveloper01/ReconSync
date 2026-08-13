@@ -324,6 +324,56 @@ func (m *Memory) ListByStatus(_ context.Context, tenantID string, status domain.
 	return out, nil
 }
 
+// ClaimSLAAtRisk marks transactions approaching their deadline and returns them.
+func (m *Memory) ClaimSLAAtRisk(_ context.Context, now time.Time, deadline, warnBefore time.Duration, limit int) ([]*domain.Transaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if limit <= 0 {
+		limit = 500
+	}
+	warnFrom := now.Add(warnBefore).Add(-deadline)
+
+	var due []*domain.Transaction
+	for _, txns := range m.byTenant {
+		for _, t := range txns {
+			if t.SLAWarnedAt != nil || t.IsBackfill || !slaAtRisk(t.Status) {
+				continue
+			}
+			if t.DebitAt.After(warnFrom) {
+				continue
+			}
+			due = append(due, t)
+		}
+	}
+	// Oldest debit first: the closest to breaching is the one to warn about.
+	sort.Slice(due, func(i, j int) bool { return due[i].DebitAt.Before(due[j].DebitAt) })
+	if len(due) > limit {
+		due = due[:limit]
+	}
+
+	out := make([]*domain.Transaction, 0, len(due))
+	for _, t := range due {
+		at := now.UTC()
+		t.SLAWarnedAt = &at
+		t.UpdatedAt = at
+		cp := *t
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+// slaAtRisk reports whether the customer's money is still out.
+func slaAtRisk(s domain.Status) bool {
+	switch s {
+	case domain.StatusOrphaned, domain.StatusReversalPending,
+		domain.StatusReversalFailed, domain.StatusSuspect:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Memory) ClaimExpired(_ context.Context, now time.Time, limit int, opts ...ClaimOption) ([]*domain.Transaction, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

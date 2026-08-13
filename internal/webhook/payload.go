@@ -61,6 +61,10 @@ type Data struct {
 	// Evidence is what that number rests on, heaviest signal first.
 	Evidence []evidence.Signal `json:"evidence,omitempty"`
 
+	// DeadlineSeconds is how long is left before this becomes a breach. Only
+	// set on sla.at_risk, where it is the whole point of the message.
+	DeadlineSeconds *int `json:"seconds_until_breach,omitempty"`
+
 	// Drill marks a synthetic transaction sent by a fire drill. It is absent
 	// from every real event, so a handler can treat its presence as an
 	// instruction to acknowledge and do nothing else.
@@ -74,6 +78,11 @@ type Data struct {
 // yields zero confidence and no signals, which is the honest reading of "we
 // recorded nothing".
 func EnvelopeFor(event EventType, t *domain.Transaction, occurredAt time.Time, ev *evidence.Set) Envelope {
+	// Every timestamp normalised to UTC, including the ones that came back from
+	// the database in the server's local zone. They were correct instants
+	// either way, but a payload carrying "…+01:00" beside "…Z" is a
+	// side-by-side comparison a reader gets wrong, and a receiver comparing
+	// strings rather than parsing gets wrong too.
 	return Envelope{
 		Event:      event,
 		OccurredAt: occurredAt.UTC(),
@@ -82,10 +91,10 @@ func EnvelopeFor(event EventType, t *domain.Transaction, occurredAt time.Time, e
 			AmountMinor:        t.AmountMinor,
 			Currency:           t.Currency,
 			Reason:             reasonFor(event),
-			DebitAt:            t.DebitAt,
+			DebitAt:            t.DebitAt.UTC(),
 			WindowSeconds:      int(t.Window() / time.Second),
-			DetectedAt:         t.DetectedAt,
-			RegulatoryDeadline: t.ExpectedCompletionAt,
+			DetectedAt:         utcOrNil(t.DetectedAt),
+			RegulatoryDeadline: t.ExpectedCompletionAt.UTC(),
 			Advisory:           true,
 			Confidence:         ev.Confidence(),
 			Evidence:           ev.Signals(),
@@ -151,6 +160,34 @@ func RecoveryEnvelope(tenantID string, silentSince, occurredAt time.Time) Integr
 			Actionable:         "reconciliation has resumed; transactions opened during the gap are being judged again",
 		},
 	}
+}
+
+// AtRiskEnvelope warns that a transaction will breach its deadline.
+//
+// The compliance report scores a breach after the fact; this is the same
+// information while there is still time to act, over exactly the same
+// population — a warning that fired for a different set than the report scores
+// would train people to ignore it.
+func AtRiskEnvelope(t *domain.Transaction, deadlineAt, occurredAt time.Time) Envelope {
+	env := EnvelopeFor(EventSLAAtRisk, t, occurredAt, nil)
+	remaining := int(deadlineAt.Sub(occurredAt) / time.Second)
+	env.Data.DeadlineSeconds = &remaining
+	env.Data.RegulatoryDeadline = deadlineAt.UTC()
+	env.Data.Reason = "approaching_reversal_deadline"
+	// No confidence: this is not a verdict about whether the transfer failed,
+	// it is a statement about the clock. Carrying a number here would invite a
+	// receiver to treat it as one.
+	env.Data.Confidence = 0
+	return env
+}
+
+// utcOrNil normalises an optional timestamp without inventing one.
+func utcOrNil(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	utc := t.UTC()
+	return &utc
 }
 
 func reasonFor(event EventType) string {

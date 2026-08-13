@@ -95,6 +95,14 @@ type TransactionStore interface {
 	// per-tenant polling would not scale. It is the single exception to the
 	// tenantID-first rule and never runs on a request path.
 	ClaimExpired(ctx context.Context, now time.Time, limit int, opts ...ClaimOption) ([]*domain.Transaction, error)
+
+	// ClaimSLAAtRisk marks and returns transactions whose regulatory deadline
+	// is approaching while the customer's money is still out.
+	//
+	// Marking and returning in one statement is what makes the warning
+	// exactly-once across replicas: a read-then-write would let two sweeps
+	// warn about the same transaction.
+	ClaimSLAAtRisk(ctx context.Context, now time.Time, deadline, warnBefore time.Duration, limit int) ([]*domain.Transaction, error)
 }
 
 // ClaimOption adjusts a detection sweep.

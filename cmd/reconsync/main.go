@@ -69,6 +69,12 @@ type config struct {
 	// checkpointInterval is the size of the window an attacker can rewrite
 	// undetected, so it is configurable rather than fixed.
 	checkpointInterval time.Duration
+
+	// reversalDeadline is the regulatory clock the sla.at_risk warning and the
+	// compliance report both measure against. slaWarnBefore is how much notice
+	// the warning gives; negative disables it.
+	reversalDeadline time.Duration
+	slaWarnBefore    time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -91,6 +97,25 @@ func loadConfig() (config, error) {
 	}
 	if c.webhookSecret == "" {
 		return c, errors.New("RECONSYNC_WEBHOOK_SECRET is required")
+	}
+	if raw := os.Getenv("RECONSYNC_REVERSAL_DEADLINE_SECONDS"); raw != "" {
+		secs, err := strconv.Atoi(raw)
+		if err != nil || secs <= 0 {
+			return c, fmt.Errorf("RECONSYNC_REVERSAL_DEADLINE_SECONDS must be a positive integer, got %q", raw)
+		}
+		c.reversalDeadline = time.Duration(secs) * time.Second
+	}
+	if raw := os.Getenv("RECONSYNC_SLA_WARN_BEFORE_SECONDS"); raw != "" {
+		secs, err := strconv.Atoi(raw)
+		if err != nil {
+			return c, fmt.Errorf("RECONSYNC_SLA_WARN_BEFORE_SECONDS must be an integer, got %q", raw)
+		}
+		// Negative disables the warning; zero would be indistinguishable from
+		// unset, so it is rejected rather than silently defaulted.
+		if secs == 0 {
+			return c, errors.New("RECONSYNC_SLA_WARN_BEFORE_SECONDS must be positive, or negative to disable")
+		}
+		c.slaWarnBefore = time.Duration(secs) * time.Second
 	}
 	if raw := os.Getenv("RECONSYNC_CHECKPOINT_INTERVAL_SECONDS"); raw != "" {
 		secs, err := strconv.Atoi(raw)
@@ -246,6 +271,9 @@ func run() error {
 		Logger:    log,
 		Providers: providers,
 		Metrics:   loopMetrics,
+
+		ReversalDeadline: cfg.reversalDeadline,
+		SLAWarnBefore:    cfg.slaWarnBefore,
 	})
 	if err != nil {
 		return err

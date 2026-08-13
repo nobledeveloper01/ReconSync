@@ -34,7 +34,7 @@ const transitionAttempts = 3
 const txnColumns = `id, tenant_id, transaction_id, idempotency_key, transaction_type,
 	provider, amount_minor, currency, status, debit_at, credit_at,
 	expected_completion_at, detected_at, reversal_triggered_at, reversal_completed_at,
-	customer_ref_hash, metadata, is_backfill, created_at, updated_at`
+	customer_ref_hash, metadata, is_backfill, sla_warned_at, created_at, updated_at`
 
 func (p *Postgres) EnsureTenant(ctx context.Context, id, name, environment string) error {
 	_, err := p.pool.Exec(ctx,
@@ -439,6 +439,45 @@ func (p *Postgres) ListByStatus(ctx context.Context, tenantID string, status dom
 
 // ClaimExpired implements the §4.4 sweep. SKIP LOCKED makes it safe across
 // replicas with no leader election.
+// slaAtRiskStatuses are the states in which the customer's money is still out.
+//
+// Exactly the set the exposure report counts and the compliance report will
+// score as a breach if nothing changes. Tying the warning to the same set is the
+// point: an alert that fires for a different population than the report scores
+// would be worse than no alert, because it would train people to ignore it.
+const slaAtRiskStatuses = `('orphaned','reversal_pending','reversal_failed','suspect')`
+
+// ClaimSLAAtRisk marks transactions approaching their deadline and returns them.
+func (p *Postgres) ClaimSLAAtRisk(ctx context.Context, now time.Time, deadline, warnBefore time.Duration, limit int) ([]*domain.Transaction, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	// The deadline runs from the debit, because that is when the customer's
+	// money left — not from when we noticed, which would let a late detection
+	// quietly extend a regulatory clock.
+	warnFrom := now.Add(warnBefore).Add(-deadline)
+
+	rows, err := p.pool.Query(ctx, `
+		UPDATE transactions t
+		SET sla_warned_at = $1, updated_at = $1
+		WHERE t.id IN (
+			SELECT id FROM transactions
+			WHERE sla_warned_at IS NULL
+			  AND NOT is_backfill
+			  AND status IN `+slaAtRiskStatuses+`
+			  AND debit_at <= $2
+			ORDER BY debit_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $3
+		)
+		RETURNING `+txnColumns, now.UTC(), warnFrom.UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim sla at risk: %w", err)
+	}
+	defer rows.Close()
+	return collectTransactions(rows)
+}
+
 func (p *Postgres) ClaimExpired(ctx context.Context, now time.Time, limit int, opts ...ClaimOption) ([]*domain.Transaction, error) {
 	if limit <= 0 {
 		limit = 500
@@ -501,7 +540,7 @@ func scanTransaction(row scanner) (*domain.Transaction, error) {
 		&t.ID, &t.TenantID, &t.TransactionID, &t.IdempotencyKey, &t.TransactionType,
 		&t.Provider, &t.AmountMinor, &t.Currency, &status, &t.DebitAt, &t.CreditAt,
 		&t.ExpectedCompletionAt, &t.DetectedAt, &t.ReversalTriggeredAt, &t.ReversalCompletedAt,
-		&t.CustomerRefHash, &rawMeta, &t.IsBackfill, &t.CreatedAt, &t.UpdatedAt,
+		&t.CustomerRefHash, &rawMeta, &t.IsBackfill, &t.SLAWarnedAt, &t.CreatedAt, &t.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
