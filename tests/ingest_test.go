@@ -18,6 +18,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/correlate"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/ingest"
+	"github.com/nobledeveloper01/ReconSync/internal/metrics"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
@@ -32,7 +33,8 @@ type ingestFixture struct {
 }
 
 type fixtureOpts struct {
-	drills ingest.DrillRunner
+	drills  ingest.DrillRunner
+	metrics *metrics.Registry
 
 	ruleSet   *rules.Set
 	ready     func(ctx context.Context) error
@@ -117,6 +119,7 @@ func newIngestFixture(t *testing.T, opts fixtureOpts) *ingestFixture {
 		Drills:   opts.drills,
 		Claims:   s,
 		Webhooks: s,
+		Metrics:  opts.metrics,
 		Auth:     authenticator,
 		Ready:    opts.ready,
 	})

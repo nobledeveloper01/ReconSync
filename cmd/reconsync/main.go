@@ -24,6 +24,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/drill"
 	"github.com/nobledeveloper01/ReconSync/internal/health"
 	"github.com/nobledeveloper01/ReconSync/internal/ingest"
+	"github.com/nobledeveloper01/ReconSync/internal/metrics"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
 	"github.com/nobledeveloper01/ReconSync/internal/provider"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
@@ -184,6 +185,10 @@ func run() error {
 	}
 	pipe.Start(ctx)
 
+	// One registry, shared by the loops that report into it and the endpoint
+	// that exposes it.
+	loopMetrics := metrics.New()
+
 	authenticator, err := auth.New(db, auth.Options{})
 	if err != nil {
 		return err
@@ -218,6 +223,7 @@ func run() error {
 		Drills:   drills,
 		Claims:   db,
 		Webhooks: db,
+		Metrics:  loopMetrics,
 		Auth:     authenticator,
 		Logger:   log,
 		Ready:    func(ctx context.Context) error { return pool.Ping(ctx) },
@@ -239,6 +245,7 @@ func run() error {
 	detector, err := service.NewDetector(db, service.DetectorOptions{
 		Logger:    log,
 		Providers: providers,
+		Metrics:   loopMetrics,
 	})
 	if err != nil {
 		return err
@@ -247,6 +254,7 @@ func run() error {
 		Logger:  log,
 		Secrets: secrets,
 		Sender:  sender,
+		Metrics: loopMetrics,
 	})
 	if err != nil {
 		return err

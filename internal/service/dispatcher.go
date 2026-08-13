@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
+	"github.com/nobledeveloper01/ReconSync/internal/metrics"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
 	"github.com/nobledeveloper01/ReconSync/internal/webhook"
 )
@@ -40,6 +41,7 @@ type Dispatcher struct {
 	secrets SecretResolver
 	log     *slog.Logger
 	now     func() time.Time
+	metrics *metrics.Registry
 
 	interval    time.Duration
 	batch       int
@@ -53,6 +55,7 @@ type DispatcherOptions struct {
 	Secrets     SecretResolver
 	Logger      *slog.Logger
 	Now         func() time.Time
+	Metrics     *metrics.Registry
 	Interval    time.Duration
 	Batch       int
 	Lease       time.Duration
@@ -74,6 +77,7 @@ func NewDispatcher(s store.Store, opts DispatcherOptions) (*Dispatcher, error) {
 		secrets:     opts.Secrets,
 		log:         opts.Logger,
 		now:         opts.Now,
+		metrics:     opts.Metrics,
 		interval:    opts.Interval,
 		batch:       opts.Batch,
 		lease:       opts.Lease,
@@ -136,6 +140,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context) (DispatchResult, error) {
 	if err != nil {
 		return res, err
 	}
+	defer func() {
+		d.metrics.RecordDispatch(d.now().UTC(), res.Delivered, res.Retrying, res.DeadLetters)
+	}()
 	res.Claimed = len(due)
 	if len(due) == 0 {
 		return res, nil

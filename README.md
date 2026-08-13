@@ -739,6 +739,45 @@ An unknown event name is rejected rather than stored: an endpoint subscribed to
 `reversal.triggerd` would sit there delivering nothing, which is a worse outcome
 than a `400`.
 
+#### Metrics, and the one to alert on
+
+`/metrics` is Prometheus text format written by hand, so the binary carries no
+metrics client dependency (§7.3: every dependency is one a customer's security
+team must approve).
+
+For a long time it reported only the ingest pipeline, which was the wrong half.
+Ingest counters climb whether or not anything is being *detected*, so a detection
+sweep that died in its goroutine looked identical to a healthy process with no
+failures: `/readyz` green, events flowing, nothing being reconciled.
+
+```
+reconsync_seconds_since_last_sweep     # alert on this one
+reconsync_detection_lag_seconds        # how far past its deadline the oldest claim was
+reconsync_detection_sweeps_total
+reconsync_detection_sweep_failures_total
+reconsync_transactions_detected_total
+reconsync_reversals_queued_total
+reconsync_suspect_total
+reconsync_orphans_without_endpoint_total
+reconsync_settled_by_rail_total
+reconsync_silent_tenants
+reconsync_deliveries_{delivered,retrying,dead_lettered}_total
+```
+
+Two of those are shaped by the failure they exist to catch:
+
+- **`reconsync_seconds_since_last_sweep` is absent until a sweep completes**, and
+  a sweep that *fails* does not refresh it. Emitting zero for a sweep that never
+  happened would read as perfect health on a process whose detector never
+  started, and the alert would never fire. A loop that runs and fails every time
+  is not a working loop.
+- **`reconsync_detection_lag_seconds` is the SLO number.** A sweep counter only
+  says the loop is turning; the lag says how long the oldest failed transfer went
+  unnoticed, which is the thing the product actually promises.
+
+`reconsync_orphans_without_endpoint_total` is worth watching too: it counts
+transactions detected as failed for a tenant with nowhere to deliver the news.
+
 ### `internal/webhook` — signing, retries, and not getting used as an SSRF pivot
 
 Signatures are HMAC-SHA256 over `{timestamp}.{body}`, sent as

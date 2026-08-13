@@ -900,9 +900,57 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	for _, m := range metrics {
 		fmt.Fprintf(&out, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", m.name, m.help, m.name, m.kind, m.name, m.value)
 	}
+	s.writeLoopMetrics(&out)
 	// A scrape that disconnects mid-write is not worth logging; nothing else can
 	// be done once the status line has gone out.
 	_, _ = io.WriteString(w, out.String())
+}
+
+// writeLoopMetrics emits the detection and dispatch metrics.
+//
+// Ingest counters alone were the gap this closes: they keep climbing whether or
+// not anything is being detected, so a dead detector goroutine looked exactly
+// like a healthy process with no failures. The gauge below is the one to alert
+// on — everything else is diagnosis once it fires.
+func (s *Server) writeLoopMetrics(out *strings.Builder) {
+	if s.metrics == nil {
+		return
+	}
+	snap := s.metrics.Read(s.now().UTC())
+
+	for _, m := range []struct {
+		name, help, kind string
+		value            uint64
+	}{
+		{"reconsync_detection_sweeps_total", "Detection sweeps completed.", "counter", snap.Sweeps},
+		{"reconsync_detection_sweep_failures_total", "Detection sweeps that errored.", "counter", snap.SweepFailures},
+		{"reconsync_transactions_detected_total", "Transactions claimed by a sweep.", "counter", snap.Detected},
+		{"reconsync_reversals_queued_total", "Reversal webhooks queued.", "counter", snap.ReversalsQueued},
+		{"reconsync_suspect_total", "Transactions raised for investigation.", "counter", snap.Suspect},
+		{"reconsync_orphans_without_endpoint_total", "Orphans with no enabled endpoint to notify.", "counter", snap.NoTarget},
+		{"reconsync_settled_by_rail_total", "Orphans the rail confirmed had settled.", "counter", snap.SettledByRail},
+		{"reconsync_deliveries_delivered_total", "Webhook deliveries accepted.", "counter", snap.Delivered},
+		{"reconsync_deliveries_retrying_total", "Webhook deliveries scheduled for retry.", "counter", snap.Retried},
+		{"reconsync_deliveries_dead_lettered_total", "Webhook deliveries that exhausted retries.", "counter", snap.DeadLettered},
+	} {
+		fmt.Fprintf(out, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", m.name, m.help, m.name, m.kind, m.name, m.value)
+	}
+
+	fmt.Fprintf(out, "# HELP reconsync_silent_tenants Tenants whose detection is currently suppressed.\n"+
+		"# TYPE reconsync_silent_tenants gauge\nreconsync_silent_tenants %d\n", snap.SilentTenants)
+
+	// Emitted only once a sweep has actually completed. Reporting zero seconds
+	// since a sweep that never happened would read as perfect health on a
+	// process whose detector never started — the alert would never fire, which
+	// is the failure this metric exists to catch.
+	if snap.SweepObserved {
+		fmt.Fprintf(out, "# HELP reconsync_seconds_since_last_sweep Seconds since the detection sweep last completed. Alert on this.\n"+
+			"# TYPE reconsync_seconds_since_last_sweep gauge\nreconsync_seconds_since_last_sweep %.3f\n",
+			snap.SecondsSinceLastSweep)
+		fmt.Fprintf(out, "# HELP reconsync_detection_lag_seconds How far past its deadline the oldest transaction in the last sweep was.\n"+
+			"# TYPE reconsync_detection_lag_seconds gauge\nreconsync_detection_lag_seconds %.3f\n",
+			snap.SweepLagSeconds)
+	}
 }
 
 // --- conversion and decoding ---

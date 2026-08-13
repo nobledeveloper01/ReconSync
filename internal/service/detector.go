@@ -11,6 +11,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/audit"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/evidence"
+	"github.com/nobledeveloper01/ReconSync/internal/metrics"
 	"github.com/nobledeveloper01/ReconSync/internal/provider"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
 	"github.com/nobledeveloper01/ReconSync/internal/webhook"
@@ -49,6 +50,7 @@ type Detector struct {
 	batch     int
 	silence   store.SilenceParams
 	providers *provider.Registry
+	metrics   *metrics.Registry
 }
 
 // DetectorOptions configures a Detector.
@@ -61,6 +63,9 @@ type DetectorOptions struct {
 	// Silence tunes when a tenant is considered too quiet to judge. A zero
 	// Quiet, Baseline or MinActiveBuckets disables the check entirely.
 	Silence *store.SilenceParams
+
+	// Metrics records what each sweep did. Optional; nil records nothing.
+	Metrics *metrics.Registry
 
 	// Providers corroborates an orphan against the rail before any reversal is
 	// queued. Optional, and opt-in for a reason: with no adapter registered
@@ -88,6 +93,7 @@ func NewDetector(s store.Store, opts DetectorOptions) (*Detector, error) {
 		d.batch = DefaultDetectBatch
 	}
 	d.providers = opts.Providers
+	d.metrics = opts.Metrics
 	if opts.Silence != nil {
 		d.silence = *opts.Silence
 	} else {
@@ -112,8 +118,10 @@ func (d *Detector) Run(ctx context.Context) {
 		case <-ticker.C:
 			if _, err := d.Sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				// A failed sweep is retried on the next tick rather than
-				// stopping the loop: the scheduler stalling is what the
-				// detection-lag alert pages on.
+				// stopping the loop. It deliberately does not refresh the
+				// last-sweep gauge: a loop that runs and fails every time is
+				// not working, and letting it look fresh would hide the outage.
+				d.metrics.RecordSweepFailure()
 				d.log.ErrorContext(ctx, "detection sweep failed", slog.String("error", err.Error()))
 			}
 		}
@@ -235,6 +243,24 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 		res.Queued += queued
 	}
 
+	// Lag is how far past its deadline the oldest thing we just claimed was.
+	// It answers the only question the SLO asks — how long a failed transfer
+	// went unnoticed — where a sweep counter only says the loop is turning.
+	var lag time.Duration
+	for _, txn := range claimed {
+		if behind := now.Sub(txn.ExpectedCompletionAt); behind > lag {
+			lag = behind
+		}
+	}
+	d.metrics.RecordSweep(now, metrics.SweepResult{
+		Claimed:       res.Claimed,
+		Queued:        res.Queued,
+		Suspect:       res.Suspect,
+		NoTarget:      res.NoTarget,
+		SettledByRail: res.Settled,
+		SilentTenants: len(res.SilentTenants),
+		Lag:           lag,
+	})
 	return res, nil
 }
 

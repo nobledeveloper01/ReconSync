@@ -14,6 +14,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/drill"
+	"github.com/nobledeveloper01/ReconSync/internal/metrics"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
@@ -67,6 +68,9 @@ type Options struct {
 	// Webhooks backs /v1/webhooks endpoint management. Optional.
 	Webhooks store.WebhookStore
 
+	// Metrics is what the background loops report into, exposed on /metrics.
+	Metrics *metrics.Registry
+
 	// Ready reports dependency health for /readyz. Liveness never calls it.
 	Ready func(ctx context.Context) error
 
@@ -96,6 +100,7 @@ type Server struct {
 	drills   DrillRunner
 	claims   store.ClaimStore
 	webhooks store.WebhookStore
+	metrics  *metrics.Registry
 	auth     *auth.Authenticator
 	ready    func(ctx context.Context) error
 	log      *slog.Logger
@@ -129,6 +134,7 @@ func New(opts Options) (*Server, error) {
 		drills:      opts.Drills,
 		claims:      opts.Claims,
 		webhooks:    opts.Webhooks,
+		metrics:     opts.Metrics,
 		auth:        opts.Auth,
 		ready:       opts.Ready,
 		log:         opts.Logger,
