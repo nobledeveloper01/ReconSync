@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -267,9 +268,29 @@ func (p *HTTPProvider) unknown(detail string) Status {
 }
 
 // lookup walks a dotted path through decoded JSON.
+//
+// A segment may be an array index — "data.0.status" — for rails that answer a
+// reference lookup with a list. Flutterwave is the one that made this
+// necessary: its transfer search returns data as an array rather than an
+// object.
+//
+// An array reached without an index resolves only when it holds exactly one
+// element. That rule is the point: a search returning several transfers for one
+// reference is ambiguous, and picking the first would be a guess about which
+// one is ours. Ambiguity ends as Unknown here, the same as everywhere else in
+// this package, because the alternative is a verdict that moves money.
 func lookup(doc map[string]any, path string) (any, bool) {
 	var current any = doc
 	for _, segment := range strings.Split(path, ".") {
+		if arr, ok := current.([]any); ok {
+			next, ok := indexArray(arr, segment)
+			if !ok {
+				return nil, false
+			}
+			current = next
+			continue
+		}
+
 		obj, ok := current.(map[string]any)
 		if !ok {
 			return nil, false
@@ -279,5 +300,33 @@ func lookup(doc map[string]any, path string) (any, bool) {
 			return nil, false
 		}
 	}
+
+	// A path ending on a single-element array resolves to that element, so
+	// "data.status" works against both shapes.
+	if arr, ok := current.([]any); ok && len(arr) == 1 {
+		return arr[0], true
+	}
 	return current, true
+}
+
+// indexArray resolves one path segment against an array.
+func indexArray(arr []any, segment string) (any, bool) {
+	if i, err := strconv.Atoi(segment); err == nil {
+		if i < 0 || i >= len(arr) {
+			return nil, false
+		}
+		return arr[i], true
+	}
+
+	// Not an index, so the segment addresses a field of the element — which is
+	// only unambiguous when there is exactly one.
+	if len(arr) != 1 {
+		return nil, false
+	}
+	obj, ok := arr[0].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	v, ok := obj[segment]
+	return v, ok
 }

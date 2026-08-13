@@ -527,3 +527,114 @@ func TestHTTPAdapterAuthWithoutATemplate(t *testing.T) {
 		t.Errorf("X-Api-Key = %q, want the value verbatim", gotAuth)
 	}
 }
+
+// Flutterwave answers a reference lookup with a list rather than an object.
+func TestHTTPAdapterHandlesAnArrayResponse(t *testing.T) {
+	const oneMatch = `{"status":"success","data":[
+		{"reference":"TXN-1","amount":5000000,"status":"SUCCESSFUL"}]}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(oneMatch))
+	}))
+	defer srv.Close()
+
+	build := func(statusPath, amountPath string) *provider.HTTPProvider {
+		t.Helper()
+		p, err := provider.NewHTTP(provider.HTTPConfig{
+			ProviderName:  "flutterwave",
+			URLTemplate:   srv.URL + "/transfers?reference={reference}",
+			StatusPath:    statusPath,
+			AmountPath:    amountPath,
+			SettledValues: []string{"successful"},
+			FailedValues:  []string{"failed"},
+		})
+		if err != nil {
+			t.Fatalf("NewHTTP: %v", err)
+		}
+		return p
+	}
+
+	// Both the explicit index and the bare field name work against a single
+	// match, so an operator does not have to know which shape they will get.
+	for _, path := range []string{"data.0.status", "data.status"} {
+		t.Run(path, func(t *testing.T) {
+			got, err := build(path, "data.0.amount").Query(context.Background(),
+				provider.Ref{TransactionID: "TXN-1", AmountMinor: 5_000_000})
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if got.Outcome != provider.Settled {
+				t.Errorf("outcome = %s, want settled: %s", got.Outcome, got.Detail)
+			}
+		})
+	}
+}
+
+// Several transfers for one reference is ambiguous. Picking the first would be
+// a guess about which one is ours, and a guess here moves real money.
+func TestHTTPAdapterRefusesAnAmbiguousArray(t *testing.T) {
+	const twoMatches = `{"data":[
+		{"reference":"TXN-1","amount":5000000,"status":"SUCCESSFUL"},
+		{"reference":"TXN-1","amount":5000000,"status":"FAILED"}]}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(twoMatches))
+	}))
+	defer srv.Close()
+
+	p, err := provider.NewHTTP(provider.HTTPConfig{
+		ProviderName:  "flutterwave",
+		URLTemplate:   srv.URL + "/transfers?reference={reference}",
+		StatusPath:    "data.status",
+		SettledValues: []string{"successful"},
+		FailedValues:  []string{"failed"},
+	})
+	if err != nil {
+		t.Fatalf("NewHTTP: %v", err)
+	}
+
+	got, err := p.Query(context.Background(), provider.Ref{TransactionID: "TXN-1"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got.Outcome != provider.Unknown {
+		t.Fatalf("outcome = %s, want unknown — two transfers share the reference", got.Outcome)
+	}
+
+	// An explicit index is the operator saying which one they mean, and is
+	// honoured. The first here reports success, so it settles.
+	indexed, err := provider.NewHTTP(provider.HTTPConfig{
+		ProviderName:  "flutterwave",
+		URLTemplate:   srv.URL + "/transfers?reference={reference}",
+		StatusPath:    "data.0.status",
+		SettledValues: []string{"successful"},
+	})
+	if err != nil {
+		t.Fatalf("NewHTTP: %v", err)
+	}
+	if got, _ := indexed.Query(context.Background(), provider.Ref{TransactionID: "TXN-1"}); got.Outcome != provider.Settled {
+		t.Errorf("explicit index = %s, want settled", got.Outcome)
+	}
+}
+
+// An empty array means the rail has no record of it, and must not be read as
+// a settlement.
+func TestHTTPAdapterHandlesAnEmptyArray(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	p, err := provider.NewHTTP(provider.HTTPConfig{
+		ProviderName:  "flutterwave",
+		URLTemplate:   srv.URL + "/transfers?reference={reference}",
+		StatusPath:    "data.status",
+		SettledValues: []string{"successful"},
+	})
+	if err != nil {
+		t.Fatalf("NewHTTP: %v", err)
+	}
+	if got, _ := p.Query(context.Background(), provider.Ref{TransactionID: "TXN-1"}); got.Outcome != provider.Unknown {
+		t.Errorf("outcome = %s, want unknown for an empty result", got.Outcome)
+	}
+}

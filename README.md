@@ -333,6 +333,14 @@ The adapter is tested against Paystack's documented response shape. That is not
 the same as testing against Paystack — a live sandbox needs an account — and the
 distinction is worth keeping: the shape is verified, the integration is not.
 
+Rails that answer a reference lookup with a **list** rather than an object —
+Flutterwave's transfer search does — work too: a path segment may be an index
+(`data.0.status`), and a bare field name resolves against an array holding
+exactly one element. Several transfers sharing one reference resolves to
+`unknown`, because picking the first would be a guess about which one is ours,
+and a guess here moves real money. An explicit index is the operator saying
+which they mean, and is honoured.
+
 The config names the environment variable holding the key rather than the key
 itself, so the file can be committed and reviewed without carrying a live
 credential. A named variable that is unset refuses to start, because an empty
