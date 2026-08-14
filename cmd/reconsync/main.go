@@ -76,6 +76,10 @@ type config struct {
 	// undetected, so it is configurable rather than fixed.
 	checkpointInterval time.Duration
 
+	// minReversalConfidence is the floor below which an orphan is raised for
+	// investigation rather than advised as a reversal. Zero keeps every verdict.
+	minReversalConfidence float64
+
 	// reversalDeadline is the regulatory clock the sla.at_risk warning and the
 	// compliance report both measure against. slaWarnBefore is how much notice
 	// the warning gives; negative disables it.
@@ -106,6 +110,13 @@ func loadConfig() (config, error) {
 	}
 	if c.webhookSecret == "" {
 		return c, errors.New("RECONSYNC_WEBHOOK_SECRET is required")
+	}
+	if raw := os.Getenv("RECONSYNC_MIN_REVERSAL_CONFIDENCE"); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil || v < 0 || v > 1 {
+			return c, fmt.Errorf("RECONSYNC_MIN_REVERSAL_CONFIDENCE must be between 0 and 1, got %q", raw)
+		}
+		c.minReversalConfidence = v
 	}
 	if raw := os.Getenv("RECONSYNC_REVERSAL_DEADLINE_SECONDS"); raw != "" {
 		secs, err := strconv.Atoi(raw)
@@ -296,6 +307,8 @@ func run() error {
 		Logger:    log,
 		Providers: providers,
 		Metrics:   loopMetrics,
+
+		MinReversalConfidence: cfg.minReversalConfidence,
 
 		ReversalDeadline: cfg.reversalDeadline,
 		SLAWarnBefore:    cfg.slaWarnBefore,

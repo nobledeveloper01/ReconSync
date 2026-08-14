@@ -663,6 +663,34 @@ data to aggregate, and a benchmark would need a deliberate opt-in telemetry
 product that does not exist. Every scorecard therefore says so in its `scope`
 field: this is your traffic, not the market's.
 
+### Windows measured against reality, and a floor on acting
+
+Two long-standing gaps, both closed by machinery that only recently existed.
+
+**A window shorter than the rail's real latency manufactures false orphans
+forever**, and no amount of corroboration fixes it — a misconfigured window looks
+exactly like a failing provider. `GET /v1/reports/window-fit` compares each
+configured window against that rail's observed settlement p95:
+
+```json
+{"provider": "paystack", "window_seconds": 250, "observed_p95_seconds": 280,
+ "too_tight": true, "recommended_window_seconds": 600,
+ "verdict": "window is 250s but 5% of settlements take longer than 280s; those are being detected as orphans. Widen to about 600s"}
+```
+
+Sized against p95, not the maximum: a window sized for the worst transaction
+ever seen would leave a genuine failure undetected for hours, which is the
+opposite failure and the one that costs a customer money. It **reports** rather
+than auto-resizing — silently changing a regulatory window is not ours to do —
+and refuses to size on fewer than 30 settlements.
+
+**`RECONSYNC_MIN_REVERSAL_CONFIDENCE`** is a floor below which an orphan is
+raised as an investigation instead of advised as a reversal. Silence alone
+reaches 0.70, so a floor above that means nothing is ever advised without a
+second, independent signal. Zero — the default — keeps the behaviour every
+deployment already had, letting a customer who is happy acting on inference
+carry on doing so.
+
 ### `internal/pipeline` — bounded everything
 
 The §4.3 worker pool. Its whole job is to absorb load without ever blocking the
@@ -1182,6 +1210,7 @@ Because payloads come in more than one shape, a receiver should switch on
 | GET | `/v1/audit/checkpoints` | The signed chain heads, to archive outside ReconSync. |
 | GET | `/v1/reports/reversal-compliance` | Prove every reversal met its deadline. `format=json\|csv`. |
 | GET | `/v1/reports/providers` | Rank your rails by failure rate and settlement latency. |
+| GET | `/v1/reports/window-fit` | Whether each configured window clears that rail's real latency. |
 | GET | `/v1/reports/exposure` | How much customer money is outstanding. `scope=all\|backfill\|live`. |
 | POST | `/v1/fire-drill` | Send a synthetic reversal to your own endpoints and report what they did. |
 | POST | `/v1/reversals/{id}/claim` | Take the exclusive right to reverse. `409` if someone already holds it. |
@@ -1269,6 +1298,7 @@ and asserts every row is claimed exactly once.
 | `RECONSYNC_PROVIDERS_FILE` | no | — | Rail status adapters. Unset disables corroboration entirely |
 | `RECONSYNC_LICENCE` | no | — | Signed licence token. Unset serves everything |
 | `RECONSYNC_LICENCE_PUBLIC_KEY` | no | — | Verifies the token. Required when one is set |
+| `RECONSYNC_MIN_REVERSAL_CONFIDENCE` | no | `0` | Floor below which an orphan becomes an investigation. Above `0.70` means nothing reverses on silence alone |
 | `RECONSYNC_REVERSAL_DEADLINE_SECONDS` | no | `86400` | The regulatory clock, from the debit. Used by `sla.at_risk` |
 | `RECONSYNC_SLA_WARN_BEFORE_SECONDS` | no | `14400` | How much notice `sla.at_risk` gives. Negative disables it |
 | `RECONSYNC_CHECKPOINT_KEY` | no | — | Ed25519 key signing audit chain heads. Unset means a wholesale rewrite is undetectable, and `/v1/audit/verify` says so |

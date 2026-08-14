@@ -514,6 +514,57 @@ func (s *Server) handleProviderScorecard(w http.ResponseWriter, r *http.Request)
 	s.writeJSON(w, r, http.StatusOK, report.ScoreProviders(principal.TenantID, from, to, stats))
 }
 
+// handleWindowFit judges each rail's configured window against what that rail
+// actually does.
+//
+// A window shorter than real settlement latency manufactures orphans that were
+// never failures, and no amount of corroboration fixes a misconfiguration that
+// looks exactly like a failing provider.
+func (s *Server) handleWindowFit(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if !s.requireLicence(w, r) {
+		return
+	}
+	if s.reports == nil {
+		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
+			"reporting is not configured on this deployment", "")
+		return
+	}
+
+	from, to, ok := s.reportPeriod(w, r)
+	if !ok {
+		return
+	}
+
+	stats, err := s.reports.ProviderStats(r.Context(), principal.TenantID, from, to)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	// The tenant's own rules, so the comparison is against the window their
+	// transactions were actually admitted under rather than a default.
+	set, err := s.rules(r.Context(), principal.TenantID)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	s.writeJSON(w, r, http.StatusOK, report.FitWindows(principal.TenantID, from, to, stats,
+		func(rail string) (int, bool) {
+			res := set.Resolve(&domain.Transaction{
+				TransactionType: "transfer",
+				Provider:        rail,
+				Currency:        "NGN",
+			})
+			return int(res.Window / time.Second), true
+		}))
+}
+
 // handleExposure answers the question a fintech evaluating ReconSync actually
 // has: how much of our customers' money is sitting unreturned right now.
 //

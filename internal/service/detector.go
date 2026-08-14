@@ -64,8 +64,9 @@ type Detector struct {
 	providers *provider.Registry
 	metrics   *metrics.Registry
 
-	deadline     time.Duration
-	slaWarnAhead time.Duration
+	deadline      time.Duration
+	slaWarnAhead  time.Duration
+	minConfidence float64
 }
 
 // DetectorOptions configures a Detector.
@@ -81,6 +82,11 @@ type DetectorOptions struct {
 
 	// Metrics records what each sweep did. Optional; nil records nothing.
 	Metrics *metrics.Registry
+
+	// MinReversalConfidence is the floor below which an orphan is raised for
+	// investigation instead of advised as a reversal. Zero keeps every verdict,
+	// which is the behaviour every deployment had before this existed.
+	MinReversalConfidence float64
 
 	// ReversalDeadline is the regulatory clock, measured from the debit.
 	// SLAWarnBefore is how long before it the sla.at_risk webhook fires.
@@ -119,6 +125,7 @@ func NewDetector(s store.Store, opts DetectorOptions) (*Detector, error) {
 	if d.deadline <= 0 {
 		d.deadline = DefaultReversalDeadline
 	}
+	d.minConfidence = opts.MinReversalConfidence
 	d.slaWarnAhead = opts.SLAWarnBefore
 	if d.slaWarnAhead == 0 {
 		d.slaWarnAhead = DefaultSLAWarnBefore
@@ -174,6 +181,10 @@ type SweepResult struct {
 
 	// AtRisk is transactions warned about before their deadline.
 	AtRisk int
+
+	// BelowConfidenceFloor is orphans downgraded to an investigation because
+	// the evidence did not reach the configured floor.
+	BelowConfidenceFloor int
 
 	// Corroboration outcomes, when a provider registry is configured.
 	Settled      int // the rail confirmed arrival, so no reversal was sent
@@ -246,6 +257,27 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 			// reversing a credit that actually succeeded pays the customer twice.
 			event = webhook.EventTransactionSuspect
 			res.Suspect++
+		} else if d.belowConfidenceFloor(ev) {
+			// The deployment has said it will not act on evidence this thin.
+			// Silence alone reaches 0.70, so a floor above that means nothing
+			// reverses without a second signal — which is what B5 asked for,
+			// expressed as a threshold rather than a hard-coded rule so a
+			// customer who is happy acting on inference still can.
+			if _, err := d.store.MarkUncertain(ctx, txn.TenantID, txn.TransactionID, now); err != nil {
+				if err := d.tolerateRace(ctx, txn, "mark uncertain", err); err != nil {
+					return res, err
+				}
+			}
+			txn.Status = domain.StatusSuspect
+			event = webhook.EventTransactionSuspect
+			res.BelowConfidenceFloor++
+			res.Suspect++
+
+			d.log.InfoContext(ctx, "verdict below the confidence floor; raising an investigation instead of a reversal",
+				slog.String("tenant_id", txn.TenantID),
+				slog.String("transaction_id", txn.TransactionID),
+				slog.Float64("confidence", ev.Confidence()),
+				slog.Float64("floor", d.minConfidence))
 		}
 
 		// Backfilled events are correlated and stored but never notify (§3.2 A3).
@@ -302,6 +334,15 @@ func (d *Detector) Sweep(ctx context.Context) (SweepResult, error) {
 		Lag:           lag,
 	})
 	return res, nil
+}
+
+// belowConfidenceFloor reports whether the evidence is too thin to advise on.
+//
+// A floor of zero disables the check entirely, which is what every deployment
+// had before this existed. Set above 0.70 — what silence alone reaches — and
+// nothing is advised as a reversal without a second, independent signal.
+func (d *Detector) belowConfidenceFloor(ev *evidence.Set) bool {
+	return d.minConfidence > 0 && ev.Confidence() < d.minConfidence
 }
 
 // warnAtRisk fires sla.at_risk for transactions approaching their deadline.

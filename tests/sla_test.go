@@ -272,3 +272,68 @@ func testClaimSLAAtRisk(t *testing.T, s store.Store) {
 		t.Error("sla_warned_at was not persisted")
 	}
 }
+
+// B5, expressed as a threshold rather than a hard-coded rule. Silence alone
+// reaches 0.70, so a floor above that means nothing is advised as a reversal
+// without a second, independent signal.
+func TestConfidenceFloorDowngradesAThinVerdict(t *testing.T) {
+	s := store.NewMemory()
+	seedTenants(t, s)
+	ctx := context.Background()
+	newEndpoint(t, s, tenantA, "we_1", "https://customer.example.com/hook")
+	mustUpsert(t, s, newExpiredTxn(tenantA, "TX-1", 5*time.Minute, time.Minute))
+
+	d, err := service.NewDetector(s, service.DetectorOptions{
+		// Above what silence alone can reach.
+		MinReversalConfidence: 0.8,
+	})
+	if err != nil {
+		t.Fatalf("NewDetector: %v", err)
+	}
+	res, err := d.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.BelowConfidenceFloor != 1 {
+		t.Fatalf("below floor = %d, want 1", res.BelowConfidenceFloor)
+	}
+
+	// It becomes an investigation, not a reversal.
+	txn, err := s.Get(ctx, tenantA, "TX-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if txn.Status != domain.StatusSuspect {
+		t.Errorf("status = %s, want suspect", txn.Status)
+	}
+
+	due, err := s.ClaimDueDeliveries(ctx, time.Now().UTC().Add(time.Minute), time.Minute, 10)
+	if err != nil {
+		t.Fatalf("ClaimDueDeliveries: %v", err)
+	}
+	for _, d := range due {
+		if d.EventType == string(webhook.EventReversalTriggered) {
+			t.Error("advised a reversal on evidence below the floor")
+		}
+	}
+}
+
+// A floor of zero is what every deployment had before this existed, and must
+// keep behaving identically.
+func TestNoConfidenceFloorKeepsEveryVerdict(t *testing.T) {
+	s := store.NewMemory()
+	seedTenants(t, s)
+	newEndpoint(t, s, tenantA, "we_1", "https://customer.example.com/hook")
+	mustUpsert(t, s, newExpiredTxn(tenantA, "TX-1", 5*time.Minute, time.Minute))
+
+	res, err := newDetector(t, s).Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.BelowConfidenceFloor != 0 {
+		t.Errorf("downgraded a verdict with no floor configured: %d", res.BelowConfidenceFloor)
+	}
+	if res.Queued != 1 {
+		t.Errorf("queued %d, want the reversal", res.Queued)
+	}
+}
