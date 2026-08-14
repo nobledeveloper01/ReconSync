@@ -32,6 +32,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/service"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
 	"github.com/nobledeveloper01/ReconSync/internal/webhook"
+	webembed "github.com/nobledeveloper01/ReconSync/web/embed"
 )
 
 func main() {
@@ -285,9 +286,12 @@ func run() error {
 		Webhooks: db,
 		Metrics:  loopMetrics,
 		Licence:  licenceChecker,
-		Auth:     authenticator,
-		Logger:   log,
-		Ready:    func(ctx context.Context) error { return pool.Ping(ctx) },
+		// Served from this same origin, so the dashboard needs no CORS and the
+		// key never crosses an origin boundary.
+		Dashboard: webembed.FS(),
+		Auth:      authenticator,
+		Logger:    log,
+		Ready:     func(ctx context.Context) error { return pool.Ping(ctx) },
 	})
 	if err != nil {
 		return err

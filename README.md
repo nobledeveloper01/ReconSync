@@ -968,6 +968,33 @@ Two of those are shaped by the failure they exist to catch:
 `reconsync_orphans_without_endpoint_total` is worth watching too: it counts
 transactions detected as failed for a tenant with nowhere to deliver the news.
 
+### The dashboard
+
+Vite and TypeScript, no runtime dependencies, built into the binary and served
+at `/` by the same process that serves the API. Five views: what is outstanding,
+transactions by state, reversal compliance, rail health, and the audit chain.
+
+**Same origin is the point.** A dashboard hosted elsewhere would need CORS opened
+on an endpoint that advises money movement, and would put the customer's key
+through a cross-origin request. Serving it from the binary needs neither, and
+there is nothing extra to deploy.
+
+The key is held in `sessionStorage` and gone when the tab closes — a key that
+outlives the session on a shared machine is a credential left lying around, and
+this one reads every transaction a tenant has. A strict content security policy
+means an injected script would have nowhere to send it.
+
+Two things it deliberately refuses to flatter:
+
+- **An empty audit chain is not a pass.** It verifies trivially, and a green tick
+  would claim an audit trail is intact when there is no audit trail.
+- **Currencies are never summed.** ₦65M and $400k appear as two blocks, because
+  one combined figure would be the most quotable wrong number in the product.
+
+```bash
+make web    # rebuild after changing anything under web/
+```
+
 ### `reconsyncctl doctor` — the preflight for what fails silently
 
 Most of what can go wrong here does not announce itself. A schema the binary

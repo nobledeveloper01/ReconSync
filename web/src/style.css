@@ -1,0 +1,179 @@
+/* Deliberately plain. This is an operational dashboard read during an incident,
+   so the numbers should be legible before the design is noticed. */
+
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #6b6b6b;
+  --line: #e2e2e2;
+  --panel: #fafafa;
+  --bad: #b3261e;
+  --warn: #8a6100;
+  --good: #1e6b34;
+  --accent: #1a4f8a;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c;
+    --fg: #e8e8e8;
+    --muted: #a0a0a0;
+    --line: #2c2f36;
+    --panel: #1d2026;
+    --bad: #f2857c;
+    --warn: #e0b050;
+    --good: #6fcf8f;
+    --accent: #7fb2ee;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+#app { max-width: 1100px; margin: 0 auto; padding: 0 24px 64px; }
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 28px;
+  flex-wrap: wrap;
+}
+
+header h1 { font-size: 18px; margin: 0; letter-spacing: -0.01em; }
+header nav { display: flex; gap: 18px; flex: 1; flex-wrap: wrap; }
+
+header nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 4px 0;
+  border-bottom: 2px solid transparent;
+}
+header nav a:hover { color: var(--fg); }
+header nav a.on { color: var(--fg); border-bottom-color: var(--accent); }
+
+h2 { font-size: 20px; margin: 0 0 4px; }
+h3 { font-size: 15px; margin: 28px 0 8px; }
+
+.note { color: var(--muted); font-size: 13px; margin: 4px 0 16px; }
+.empty { color: var(--muted); font-style: italic; }
+.good { color: var(--good); }
+.bad { color: var(--bad); }
+.thin { color: var(--muted); font-size: 12px; }
+
+.cards { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0 20px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px 16px;
+  min-width: 150px;
+  flex: 1;
+}
+.card-title { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.card-value { font-size: 22px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.card-note { color: var(--muted); font-size: 12px; }
+
+table { width: 100%; border-collapse: collapse; margin: 8px 0 20px; font-size: 14px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+/* Amounts and durations line up when they are tabular. */
+td { font-variant-numeric: tabular-nums; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+
+.banner { padding: 10px 14px; border-radius: 6px; margin: 12px 0; border: 1px solid; font-size: 14px; }
+.banner-bad { color: var(--bad); border-color: var(--bad); background: color-mix(in srgb, var(--bad) 8%, transparent); }
+.banner-warn { color: var(--warn); border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.banner-good { color: var(--good); border-color: var(--good); background: color-mix(in srgb, var(--good) 8%, transparent); }
+
+.status { font-size: 12px; padding: 2px 7px; border-radius: 10px; border: 1px solid var(--line); white-space: nowrap; }
+.status-orphaned, .status-reversal_failed { color: var(--bad); border-color: var(--bad); }
+.status-suspect { color: var(--warn); border-color: var(--warn); }
+.status-completed, .status-reversal_completed { color: var(--good); border-color: var(--good); }
+
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0; }
+.tab {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 14px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+.tab:hover { color: var(--fg); }
+.tab-on { color: var(--fg); border-color: var(--accent); }
+
+.loading { color: var(--muted); padding: 20px 0; }
+
+.downloads { display: flex; gap: 16px; margin-top: 16px; }
+.downloads a { color: var(--accent); }
+
+.signin { max-width: 380px; margin: 15vh auto; }
+.signin h1 { font-size: 24px; margin-bottom: 4px; }
+.signin form { display: flex; gap: 8px; margin: 16px 0; }
+.signin input {
+  flex: 1;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.signin button, #sign-out {
+  padding: 9px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+}
+.signin button:hover, #sign-out:hover { border-color: var(--accent); }
+
+/* Narrow screens: the header stacks rather than letting the nav wrap into a
+   column beside the logo, which is what it did at 390px. */
+@media (max-width: 620px) {
+  #app { padding: 0 14px 48px; }
+
+  header {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 10px 12px;
+    padding: 14px 0;
+  }
+  header h1 { grid-row: 1; }
+  #sign-out { grid-row: 1; grid-column: 2; }
+  header nav {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    gap: 14px;
+    overflow-x: auto;
+    /* Tabs scroll sideways rather than reflowing, so their order stays stable
+       as the viewport changes. */
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+  }
+  header nav::-webkit-scrollbar { display: none; }
+  header nav a { white-space: nowrap; }
+
+  .card { min-width: 130px; }
+  .card-value { font-size: 19px; }
+
+  /* Tables are the one thing that cannot usefully reflow: a compliance table
+     with reordered columns is harder to read, not easier. Scroll it. */
+  table { display: block; overflow-x: auto; white-space: nowrap; }
+}

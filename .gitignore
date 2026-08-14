@@ -11,3 +11,9 @@ node_modules/
 
 # Local working notes — not published
 docs/
+.gstack/
+
+# The dashboard's build inputs; embed/dist is committed so a Go build never
+# needs node.
+web/node_modules/
+web/dist/

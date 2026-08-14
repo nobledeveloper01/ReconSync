@@ -76,6 +76,10 @@ type Options struct {
 	// serves everything — the behaviour every deployment had before licensing.
 	Licence *licence.Checker
 
+	// Dashboard is the built web app, served at the root. Nil serves no
+	// dashboard, which is what a headless deployment wants.
+	Dashboard DashboardFS
+
 	// Ready reports dependency health for /readyz. Liveness never calls it.
 	Ready func(ctx context.Context) error
 
@@ -97,21 +101,22 @@ type DrillRunner interface {
 
 // Server serves the ingest API.
 type Server struct {
-	sink     EventSink
-	rules    RuleProvider
-	store    store.TransactionStore
-	audit    store.AuditStore
-	reports  store.ReportStore
-	drills   DrillRunner
-	claims   store.ClaimStore
-	webhooks store.WebhookStore
-	metrics  *metrics.Registry
-	licence  *licence.Checker
-	auth     *auth.Authenticator
-	ready    func(ctx context.Context) error
-	log      *slog.Logger
-	now      func() time.Time
-	handler  http.Handler
+	sink      EventSink
+	rules     RuleProvider
+	store     store.TransactionStore
+	audit     store.AuditStore
+	reports   store.ReportStore
+	drills    DrillRunner
+	claims    store.ClaimStore
+	webhooks  store.WebhookStore
+	metrics   *metrics.Registry
+	licence   *licence.Checker
+	dashboard DashboardFS
+	auth      *auth.Authenticator
+	ready     func(ctx context.Context) error
+	log       *slog.Logger
+	now       func() time.Time
+	handler   http.Handler
 
 	maxBody     int64
 	maxBulkBody int64
@@ -142,6 +147,7 @@ func New(opts Options) (*Server, error) {
 		webhooks:    opts.Webhooks,
 		metrics:     opts.Metrics,
 		licence:     opts.Licence,
+		dashboard:   opts.Dashboard,
 		auth:        opts.Auth,
 		ready:       opts.Ready,
 		log:         opts.Logger,
@@ -208,6 +214,10 @@ func (s *Server) routes() http.Handler {
 	root.HandleFunc("GET /healthz", s.handleHealthz)
 	root.HandleFunc("GET /readyz", s.handleReadyz)
 	root.HandleFunc("GET /metrics", s.handleMetrics)
+
+	// Last, so it claims only what the API has not: the root pattern would
+	// otherwise swallow every path.
+	s.mountDashboard(root)
 
 	return s.recoverPanics(s.withRequestID(root))
 }

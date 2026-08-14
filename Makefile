@@ -1,4 +1,4 @@
-.PHONY: help build test test-integration race lint vet fmt tidy db-setup db-drop migrate-up migrate-status migrate-down ci
+.PHONY: help web build test test-integration race lint vet fmt tidy db-setup db-drop migrate-up migrate-status migrate-down ci
 
 TEST_DB      ?= reconsync_test
 TEST_DB_URL  ?= postgres://localhost:5432/$(TEST_DB)?sslmode=disable
@@ -9,6 +9,10 @@ GOLANGCI_LINT_VERSION ?= v2.12.2
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "};{printf "  \033[36m%-18s\033[0m %s\n",$$1,$$2}'
+
+web: ## Rebuild the dashboard and stage it for embedding
+	cd web && npm install --silent && npm run build
+	rm -rf web/embed/dist && cp -r web/dist web/embed/dist
 
 build: ## Compile everything
 	go build ./...

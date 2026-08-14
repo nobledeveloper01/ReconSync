@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/nobledeveloper01/ReconSync/internal/audit"
@@ -34,9 +35,10 @@ type ingestFixture struct {
 }
 
 type fixtureOpts struct {
-	drills  ingest.DrillRunner
-	metrics *metrics.Registry
-	licence *licence.Checker
+	dashboard fstest.MapFS
+	drills    ingest.DrillRunner
+	metrics   *metrics.Registry
+	licence   *licence.Checker
 
 	ruleSet   *rules.Set
 	ready     func(ctx context.Context) error
@@ -122,9 +124,15 @@ func newIngestFixture(t *testing.T, opts fixtureOpts) *ingestFixture {
 		Claims:   s,
 		Webhooks: s,
 		Metrics:  opts.metrics,
-		Licence:  opts.licence,
-		Auth:     authenticator,
-		Ready:    opts.ready,
+		Dashboard: func() ingest.DashboardFS {
+			if opts.dashboard == nil {
+				return nil
+			}
+			return opts.dashboard
+		}(),
+		Licence: opts.licence,
+		Auth:    authenticator,
+		Ready:   opts.ready,
 	})
 	if err != nil {
 		t.Fatalf("ingest.New: %v", err)
@@ -804,5 +812,76 @@ func TestIngestComplianceReport(t *testing.T) {
 func TestIngestNewValidatesOptions(t *testing.T) {
 	if _, err := ingest.New(ingest.Options{}); err == nil {
 		t.Error("accepted empty options")
+	}
+}
+
+// The dashboard is served by this binary from the same origin as the API, which
+// is what lets it exist without CORS on an endpoint that advises money movement.
+func TestDashboardIsServedAndDoesNotShadowTheAPI(t *testing.T) {
+	f := newIngestFixture(t, fixtureOpts{dashboard: fstest.MapFS{
+		"index.html":    &fstest.MapFile{Data: []byte("<!doctype html><div id=app>")},
+		"assets/app.js": &fstest.MapFile{Data: []byte("console.log(1)")},
+	}})
+
+	// The app loads at the root.
+	w := f.do(t, http.MethodGet, "/", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "id=app") {
+		t.Errorf("root did not serve the app: %s", w.Body.String())
+	}
+
+	// A deep link refreshes into the app rather than 404ing, because the router
+	// lives in the fragment.
+	if w := f.do(t, http.MethodGet, "/anything", "", nil); w.Code != http.StatusOK {
+		t.Errorf("deep link = %d, want the app", w.Code)
+	}
+
+	// Assets are served as themselves.
+	if w := f.do(t, http.MethodGet, "/assets/app.js", "", nil); w.Code != http.StatusOK {
+		t.Errorf("asset = %d", w.Code)
+	}
+
+	// And crucially the API is untouched: an unauthenticated API path must
+	// still be a 401, not the dashboard's index page with a 200.
+	w = f.do(t, http.MethodGet, "/v1/transactions?status=orphaned", "", nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated API call = %d, want 401 — the dashboard swallowed it", w.Code)
+	}
+	if w := f.do(t, http.MethodGet, "/healthz", "", nil); w.Code != http.StatusOK {
+		t.Errorf("healthz = %d", w.Code)
+	}
+}
+
+// The page holds an API key in the tab, so an injected script must have nowhere
+// to send it.
+func TestDashboardSetsASecurityPolicy(t *testing.T) {
+	f := newIngestFixture(t, fixtureOpts{dashboard: fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<!doctype html>")},
+	}})
+
+	w := f.do(t, http.MethodGet, "/", "", nil)
+	csp := w.Header().Get("Content-Security-Policy")
+	for _, want := range []string{"default-src 'self'", "connect-src 'self'", "frame-ancestors 'none'"} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("CSP %q is missing %q", csp, want)
+		}
+	}
+	// index.html must not be cached, or a deploy leaves browsers running the
+	// old app against a new API.
+	if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Errorf("index Cache-Control = %q, want no-store", cc)
+	}
+}
+
+// A build with no dashboard serves no dashboard, rather than failing to start.
+func TestNoDashboardIsNotAnError(t *testing.T) {
+	f := newIngestFixture(t, fixtureOpts{})
+	if w := f.do(t, http.MethodGet, "/", "", nil); w.Code == http.StatusOK {
+		t.Errorf("served a dashboard that was never provided: %d", w.Code)
+	}
+	if w := f.do(t, http.MethodGet, "/healthz", "", nil); w.Code != http.StatusOK {
+		t.Errorf("healthz = %d with no dashboard", w.Code)
 	}
 }
