@@ -131,6 +131,12 @@ type CreditEvent struct {
 	// whole amount" — the assumption the system made silently before this
 	// field existed, now made explicit.
 	AmountMinor int64
+
+	// Currency of that amount. An amount without a currency is not a quantity
+	// of money: 5,000,000 kobo and 5,000,000 of anything else are different
+	// sums that compare equal. Empty means "the transaction's own currency",
+	// which is the single-currency case and what every existing client sends.
+	Currency string
 }
 
 // ExpectedCredit is what should arrive for this transaction.

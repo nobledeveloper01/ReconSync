@@ -267,3 +267,81 @@ func testParkedCreditKeepsItsAmount(t *testing.T, s store.Store) {
 			parked[0].AmountMinor)
 	}
 }
+
+// An amount without a currency is not a quantity of money. Comparing bare
+// numbers would settle a ₦50,000 transfer with $50,000, or call a correct
+// settlement short — either way a verdict on money we cannot compare.
+func testCreditInAnotherCurrencyNeverSettles(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	mustUpsert(t, s, newDebitTxn(tenantA, "TX-FX", time.Hour)) // 5,000,000 NGN
+
+	credit := amountCredit("TX-FX", "fx1", 5_000_000)
+	credit.Currency = "USD"
+
+	got, err := s.ApplyPartialCredit(ctx, tenantA, credit)
+	if err != nil {
+		t.Fatalf("ApplyPartialCredit: %v", err)
+	}
+	if got.Status != domain.StatusSuspect {
+		t.Errorf("status = %s on a currency mismatch, want suspect", got.Status)
+	}
+	if got.CreditedMinor != 0 {
+		t.Errorf("credited = %d — money in another currency was counted toward the total",
+			got.CreditedMinor)
+	}
+
+	// The transaction's own currency settles normally.
+	same := amountCredit("TX-FX2", "fx2", 5_000_000)
+	same.Currency = "NGN"
+	mustUpsert(t, s, newDebitTxn(tenantA, "TX-FX2", time.Hour))
+	if got, err = s.ApplyPartialCredit(ctx, tenantA, same); err != nil {
+		t.Fatalf("ApplyPartialCredit: %v", err)
+	}
+	if got.Status != domain.StatusCompleted {
+		t.Errorf("status = %s with a matching currency, want completed", got.Status)
+	}
+}
+
+// Credits have no idempotency dedupe at ingest, so the claim inside the store
+// is the only thing standing between a client retry and a doubled total. Worth
+// proving through the API a customer actually calls.
+func TestReplayedCreditOverHTTPIsCountedOnce(t *testing.T) {
+	f := newIngestFixture(t, fixtureOpts{})
+	now := time.Now().UTC()
+	ctx := context.Background()
+
+	if w := f.do(t, http.MethodPost, "/v1/events/debit", f.keyA, map[string]any{
+		"transaction_id": "TX-R", "transaction_type": "transfer", "provider": "paystack",
+		"amount_minor": 5000000, "currency": "NGN", "debit_at": now.Format(time.RFC3339),
+		"customer_ref": "usr", "idempotency_key": "dr",
+	}); w.Code != http.StatusAccepted {
+		t.Fatalf("debit = %d", w.Code)
+	}
+
+	// The same credit five times, as a retrying client would send it.
+	for i := 0; i < 5; i++ {
+		if w := f.do(t, http.MethodPost, "/v1/events/credit", f.keyA, map[string]any{
+			"transaction_id": "TX-R", "status": "success", "idempotency_key": "cr",
+			"amount_minor": 1000000, "credit_at": now.Format(time.RFC3339),
+		}); w.Code != http.StatusAccepted {
+			t.Fatalf("credit %d = %d", i, w.Code)
+		}
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var got *domain.Transaction
+	for time.Now().Before(deadline) {
+		var err error
+		if got, err = f.store.Get(ctx, tenantA, "TX-R"); err == nil && got.CreditedMinor > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got == nil || got.CreditedMinor != 1_000_000 {
+		t.Fatalf("credited = %+v after five deliveries of one credit, want 1000000", got)
+	}
+	if got.Status == domain.StatusCompleted {
+		t.Error("a retried credit settled a transaction that is still short")
+	}
+}

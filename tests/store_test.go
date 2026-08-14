@@ -42,6 +42,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"PartialCreditRejectsAReplay", testPartialCreditRejectsAReplay},
 		{"ParkedCreditKeepsItsAmount", testParkedCreditKeepsItsAmount},
 		{"PartialCreditIsCountedOnce", testPartialCreditIsCountedOnce},
+		{"CreditInAnotherCurrencyNeverSettles", testCreditInAnotherCurrencyNeverSettles},
 		{"ClaimExpired", testClaimExpired},
 		{"ClaimExpiredIsNotRepeatable", testClaimExpiredOnce},
 		{"ClaimExpiredRespectsLimit", testClaimExpiredLimit},

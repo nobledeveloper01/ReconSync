@@ -53,6 +53,9 @@ type creditRequest struct {
 	// whole amount", which is what the system assumed silently before this
 	// field existed.
 	AmountMinor int64 `json:"amount_minor,omitempty"`
+
+	// Currency of that amount. Optional; empty means the transaction's own.
+	Currency string `json:"currency,omitempty"`
 }
 
 type reversalCompletedRequest struct {
@@ -1070,6 +1073,7 @@ func (s *Server) toCreditEvent(tenantID, idemKey string, req *creditRequest) (*d
 		ProviderReference: req.ProviderReference,
 		Status:            domain.CreditStatus(req.Status),
 		AmountMinor:       req.AmountMinor,
+		Currency:          strings.ToUpper(strings.TrimSpace(req.Currency)),
 	}
 	if ev.CreditAt.IsZero() {
 		ev.CreditAt = s.now().UTC()

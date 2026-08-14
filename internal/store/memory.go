@@ -181,6 +181,16 @@ func (m *Memory) ApplyPartialCredit(_ context.Context, tenantID string, c *domai
 	}
 	m.applied[tenantID][c.IdempotencyKey] = struct{}{}
 
+	// A credit in a different currency is not a settlement of this
+	// transaction: comparing the bare numbers would settle a ₦50,000 transfer
+	// with $50,000. A human decides what it was.
+	if c.Currency != "" && c.Currency != stored.Currency {
+		stored.Status = domain.StatusSuspect
+		stored.UpdatedAt = time.Now().UTC()
+		out := *stored
+		return &out, nil
+	}
+
 	stored.CreditedMinor += amountMinor
 	at := creditAt.UTC()
 	stored.CreditAt = &at

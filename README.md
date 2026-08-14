@@ -181,6 +181,13 @@ A credit may now state `amount_minor`, and a debit may state
 | Fee: debit 50,000, expect 49,750, credit 49,750 | Settles. The fee is not a shortfall |
 | More than expected | `suspect` — an overpayment is not a settlement and not a failure |
 
+A credit may also state its `currency`. **An amount without a currency is not a
+quantity of money** — 5,000,000 kobo and 5,000,000 of anything else compare
+equal — so a credit whose currency differs from the transaction's settles
+nothing and goes to `suspect` for a human. The exposure report already refused
+to sum across currencies for exactly this reason; settlement was the
+inconsistent half.
+
 **Accumulation had to be made idempotent, and that was not obvious.** The old
 path was replay-safe for free, because a settled transaction rejects further
 credits. A running total is not: the pipeline can legitimately deliver the same
@@ -192,6 +199,11 @@ idempotency key in the same transaction as the accumulation.
 That bug reached a green test suite. It surfaced as a *flaky* test, and only
 after the failure message was made to print what it actually saw — a doubled
 total — rather than just that it had timed out.
+
+Credits have no idempotency dedupe at ingest, unlike debits, so that claim
+inside the store is the only thing standing between a client retry and a doubled
+total. There is a test that sends the same credit five times over HTTP and
+asserts it counts once.
 
 ### `internal/rules` — how long a transaction has
 

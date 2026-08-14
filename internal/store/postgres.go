@@ -489,12 +489,23 @@ func (p *Postgres) ApplyPartialCredit(ctx context.Context, tenantID string, c *d
 	}
 
 	transactionID, amountMinor, creditAt := c.TransactionID, c.AmountMinor, c.CreditAt
+
+	// A credit in a different currency is not a settlement of this transaction.
+	// Comparing the bare numbers would settle a ₦50,000 transfer with $50,000,
+	// or call a correct settlement short — either way a verdict on money we
+	// cannot actually compare.
+	currency := c.Currency
 	rows, err := tx.Query(ctx, `
 		UPDATE transactions t
-		SET credited_minor = t.credited_minor + $3,
+		SET credited_minor = CASE
+		        WHEN $5 <> '' AND $5 <> t.currency THEN t.credited_minor
+		        ELSE t.credited_minor + $3
+		    END,
 		    credit_at = $4,
 		    updated_at = now(),
 		    status = CASE
+		        -- Money we cannot compare. A human decides what it was.
+		        WHEN $5 <> '' AND $5 <> t.currency THEN 'suspect'
 		        -- More arrived than was ever expected. Not a settlement and not
 		        -- a failure: a human decides what an overpayment means.
 		        WHEN t.credited_minor + $3 > COALESCE(t.expected_credit_minor, t.amount_minor) THEN 'suspect'
@@ -505,7 +516,7 @@ func (p *Postgres) ApplyPartialCredit(ctx context.Context, tenantID string, c *d
 		    END
 		WHERE t.tenant_id = $1 AND t.transaction_id = $2
 		  AND t.status IN ('pending_debit', 'pending_unknown')
-		RETURNING `+txnColumns, tenantID, transactionID, amountMinor, creditAt.UTC())
+		RETURNING `+txnColumns, tenantID, transactionID, amountMinor, creditAt.UTC(), currency)
 	if err != nil {
 		return nil, fmt.Errorf("apply partial credit: %w", err)
 	}
