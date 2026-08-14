@@ -820,6 +820,45 @@ Two of those are shaped by the failure they exist to catch:
 `reconsync_orphans_without_endpoint_total` is worth watching too: it counts
 transactions detected as failed for a tenant with nowhere to deliver the news.
 
+### `internal/licence` — what expiry does, and what it must never do
+
+Expiry withholds the **artefacts**: the compliance report, the exposure report,
+the provider scorecard and audit verification. It never touches ingest,
+detection or reversal delivery.
+
+That is not generosity. Blocking ingest would mean new debits are never
+observed, so the customer believes they are covered and is not — silent, and on
+our signature. Blocking credits would be worse: every in-flight debit would
+reach its window with no credit, orphan, and fire a spurious reversal, which is
+the exact double-payment this product exists to prevent. An expiry that
+generates incidents is a liability, not a commercial control.
+
+```bash
+reconsyncctl licence keygen                                  # vendor, once
+reconsyncctl licence issue --customer "Acme" --months 6      # vendor, per deal
+reconsyncctl licence show                                    # customer
+curl /v1/licence                                             # customer
+```
+
+Four decisions:
+
+- **One check location.** Four endpoints consult `ArtefactsAvailable()`, and
+  nothing else in the codebase asks about licensing. Scattering checks adds bugs,
+  not security — and what is being protected is a report, not a payment.
+- **`402`, not `403`.** An expired licence is not an authorisation failure, and
+  calling it one sends an operator hunting for a permissions bug.
+- **`/v1/licence` answers even when expired.** A customer whose reports have
+  stopped needs that endpoint most; withholding the explanation along with the
+  artefact would be the worst possible moment to go quiet. The countdown runs
+  negative afterwards so support can say *how long ago*.
+- **No licence configured serves everything.** That is what every deployment had
+  before licensing existed, and defaulting the other way would have locked them
+  all out on upgrade.
+
+Ed25519, so shipping the verifier does not ship the ability to mint licences.
+It is still theatre — the customer compiles this source and one line defeats it
+permanently. It is bookkeeping for honest customers, and priced accordingly.
+
 ### `internal/webhook` — signing, retries, and not getting used as an SSRF pivot
 
 Signatures are HMAC-SHA256 over `{timestamp}.{body}`, sent as
@@ -1104,6 +1143,7 @@ Because payloads come in more than one shape, a receiver should switch on
 | POST | `/v1/events/reversal-completed` | Confirm a reversal; returns detection-to-confirmation elapsed time. |
 | GET | `/v1/transactions/{id}` | One transaction. |
 | GET | `/v1/transactions?status=&limit=` | List by state. |
+| GET | `/v1/licence` | Licence state and the days-remaining countdown. Answers even when expired. |
 | GET | `/v1/audit/verify` | Recompute the tenant's audit chain and check it against its signature. |
 | GET | `/v1/audit/checkpoints` | The signed chain heads, to archive outside ReconSync. |
 | GET | `/v1/reports/reversal-compliance` | Prove every reversal met its deadline. `format=json\|csv`. |
@@ -1193,6 +1233,8 @@ and asserts every row is claimed exactly once.
 | `RECONSYNC_ADDR` | no | `:8080` | Listen address |
 | `RECONSYNC_DRAIN_TIMEOUT_SECONDS` | no | `20` | Graceful shutdown budget |
 | `RECONSYNC_PROVIDERS_FILE` | no | — | Rail status adapters. Unset disables corroboration entirely |
+| `RECONSYNC_LICENCE` | no | — | Signed licence token. Unset serves everything |
+| `RECONSYNC_LICENCE_PUBLIC_KEY` | no | — | Verifies the token. Required when one is set |
 | `RECONSYNC_REVERSAL_DEADLINE_SECONDS` | no | `86400` | The regulatory clock, from the debit. Used by `sla.at_risk` |
 | `RECONSYNC_SLA_WARN_BEFORE_SECONDS` | no | `14400` | How much notice `sla.at_risk` gives. Negative disables it |
 | `RECONSYNC_CHECKPOINT_KEY` | no | — | Ed25519 key signing audit chain heads. Unset means a wholesale rewrite is undetectable, and `/v1/audit/verify` says so |

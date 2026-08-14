@@ -425,6 +425,9 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
 		return
 	}
+	if !s.requireLicence(w, r) {
+		return
+	}
 	if s.audit == nil {
 		// Saying "unavailable" beats returning a pass this build cannot support.
 		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
@@ -489,6 +492,9 @@ func (s *Server) handleProviderScorecard(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
 		return
 	}
+	if !s.requireLicence(w, r) {
+		return
+	}
 	if s.reports == nil {
 		s.writeError(w, r, http.StatusNotImplemented, "unavailable",
 			"reporting is not configured on this deployment", "")
@@ -519,6 +525,9 @@ func (s *Server) handleExposure(w http.ResponseWriter, r *http.Request) {
 	principal, ok := auth.PrincipalFrom(r.Context())
 	if !ok {
 		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if !s.requireLicence(w, r) {
 		return
 	}
 	if s.reports == nil {
@@ -765,6 +774,9 @@ func (s *Server) handleComplianceReport(w http.ResponseWriter, r *http.Request) 
 	principal, ok := auth.PrincipalFrom(r.Context())
 	if !ok {
 		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "invalid api key", "")
+		return
+	}
+	if !s.requireLicence(w, r) {
 		return
 	}
 	if s.reports == nil {

@@ -41,6 +41,9 @@ Usage:
   reconsyncctl rules create --tenant ID --window SECONDS [--type T] [--provider P]
   reconsyncctl rules list --tenant ID
   reconsyncctl rules delete --tenant ID --id RULE_ID
+  reconsyncctl licence keygen                  mint the licence signing key (vendor)
+  reconsyncctl licence issue --customer NAME --months N   (vendor)
+  reconsyncctl licence show                    what the configured licence says
   reconsyncctl checkpoints keygen              mint an audit signing key
   reconsyncctl checkpoints list --tenant ID    signed chain heads, as JSON to archive
   reconsyncctl checkpoints verify --tenant ID [--public-key KEY]
@@ -100,6 +103,13 @@ func run(args []string) error {
 			"create": rulesCreate,
 			"list":   rulesList,
 			"delete": rulesDelete,
+		})
+
+	case "licence":
+		return dispatch(ctx, "licence", args[1:], map[string]subcommand{
+			"keygen": licenceKeygen,
+			"issue":  licenceIssue,
+			"show":   licenceShow,
 		})
 
 	case "checkpoints":

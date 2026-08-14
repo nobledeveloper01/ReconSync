@@ -14,6 +14,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/drill"
+	"github.com/nobledeveloper01/ReconSync/internal/licence"
 	"github.com/nobledeveloper01/ReconSync/internal/metrics"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
@@ -71,6 +72,10 @@ type Options struct {
 	// Metrics is what the background loops report into, exposed on /metrics.
 	Metrics *metrics.Registry
 
+	// Licence gates the commercial artefacts. Nil means unlicensed, which
+	// serves everything — the behaviour every deployment had before licensing.
+	Licence *licence.Checker
+
 	// Ready reports dependency health for /readyz. Liveness never calls it.
 	Ready func(ctx context.Context) error
 
@@ -101,6 +106,7 @@ type Server struct {
 	claims   store.ClaimStore
 	webhooks store.WebhookStore
 	metrics  *metrics.Registry
+	licence  *licence.Checker
 	auth     *auth.Authenticator
 	ready    func(ctx context.Context) error
 	log      *slog.Logger
@@ -135,6 +141,7 @@ func New(opts Options) (*Server, error) {
 		claims:      opts.Claims,
 		webhooks:    opts.Webhooks,
 		metrics:     opts.Metrics,
+		licence:     opts.Licence,
 		auth:        opts.Auth,
 		ready:       opts.Ready,
 		log:         opts.Logger,
@@ -176,6 +183,7 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("POST /v1/events/reversal-completed", s.handleReversalCompleted)
 	api.HandleFunc("GET /v1/transactions", s.handleListTransactions)
 	api.HandleFunc("GET /v1/transactions/{transaction_id}", s.handleGetTransaction)
+	api.HandleFunc("GET /v1/licence", s.handleLicence)
 	api.HandleFunc("GET /v1/audit/verify", s.handleAuditVerify)
 	api.HandleFunc("GET /v1/audit/checkpoints", s.handleAuditCheckpoints)
 	api.HandleFunc("GET /v1/reports/reversal-compliance", s.handleComplianceReport)

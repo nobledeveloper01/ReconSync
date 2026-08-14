@@ -24,6 +24,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/drill"
 	"github.com/nobledeveloper01/ReconSync/internal/health"
 	"github.com/nobledeveloper01/ReconSync/internal/ingest"
+	"github.com/nobledeveloper01/ReconSync/internal/licence"
 	"github.com/nobledeveloper01/ReconSync/internal/metrics"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
 	"github.com/nobledeveloper01/ReconSync/internal/provider"
@@ -61,6 +62,11 @@ type config struct {
 	// corroboration entirely.
 	providersFile string
 
+	// licenceToken and licencePublicKey gate the commercial artefacts. Both
+	// empty means unlicensed, which serves everything.
+	licenceToken     string
+	licencePublicKey string
+
 	// checkpointKey signs audit chain heads. Empty disables checkpointing, and
 	// the verify endpoint then says so rather than implying a guarantee that
 	// is not there.
@@ -85,7 +91,10 @@ func loadConfig() (config, error) {
 		webhookSecret: os.Getenv("RECONSYNC_WEBHOOK_SECRET"),
 		providersFile: os.Getenv("RECONSYNC_PROVIDERS_FILE"),
 		checkpointKey: os.Getenv("RECONSYNC_CHECKPOINT_KEY"),
-		drainTimeout:  20 * time.Second,
+		licenceToken:  os.Getenv("RECONSYNC_LICENCE"),
+
+		licencePublicKey: os.Getenv("RECONSYNC_LICENCE_PUBLIC_KEY"),
+		drainTimeout:     20 * time.Second,
 	}
 	if c.databaseURL == "" {
 		return c, errors.New("RECONSYNC_DATABASE_URL is required")
@@ -214,6 +223,21 @@ func run() error {
 	// that exposes it.
 	loopMetrics := metrics.New()
 
+	// A token that will not verify stops startup rather than silently
+	// downgrading to unlicensed: a customer who pasted a corrupted key should
+	// find out now, not when an auditor asks for a report.
+	licenceChecker, err := licence.New(licence.Options{
+		Token:     licence.Token(cfg.licenceToken),
+		PublicKey: cfg.licencePublicKey,
+	})
+	if err != nil {
+		return err
+	}
+	if st := licenceChecker.Status(); st.Notice != "" {
+		log.Warn("licence", slog.String("customer", st.Customer),
+			slog.Int("days_remaining", st.DaysRemaining), slog.String("notice", st.Notice))
+	}
+
 	authenticator, err := auth.New(db, auth.Options{})
 	if err != nil {
 		return err
@@ -249,6 +273,7 @@ func run() error {
 		Claims:   db,
 		Webhooks: db,
 		Metrics:  loopMetrics,
+		Licence:  licenceChecker,
 		Auth:     authenticator,
 		Logger:   log,
 		Ready:    func(ctx context.Context) error { return pool.Ping(ctx) },
