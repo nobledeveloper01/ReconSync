@@ -205,6 +205,12 @@ inside the store is the only thing standing between a client retry and a doubled
 total. There is a test that sends the same credit five times over HTTP and
 asserts it counts once.
 
+Adding partial settlement also **invalidated the exposure report**, which summed
+the full debited amount and so counted money that had already reached the
+destination as still outstanding. Exposure is now the shortfall — what left and
+has not arrived — and a test asserts the age bands sum to the same figure as the
+total, so the report cannot contradict itself between two of its own sections.
+
 ### `internal/rules` — how long a transaction has
 
 Resolves the reconciliation window for a transaction. Rules match on transaction

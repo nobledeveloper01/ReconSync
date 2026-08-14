@@ -33,17 +33,25 @@ func (m *Memory) Exposure(_ context.Context, tenantID string, scope report.Scope
 			}
 			byCurrency[t.Currency] = a
 		}
+		// What left and has not arrived, not what was debited: counting the
+		// full amount of a partly settled transaction would report money that
+		// did reach the destination as still outstanding.
+		outstanding := t.AmountMinor - t.CreditedMinor
+		if outstanding < 0 {
+			outstanding = 0
+		}
+
 		a.total.Transactions++
-		a.total.AmountMinor += t.AmountMinor
+		a.total.AmountMinor += outstanding
 		a.customers[t.CustomerRefHash] = struct{}{}
 		if t.DebitAt.Before(a.total.OldestDebitAt) {
 			a.total.OldestDebitAt = t.DebitAt
 		}
 		if t.Status == domain.StatusSuspect {
 			a.total.UnresolvedTransactions++
-			a.total.UnresolvedAmountMinor += t.AmountMinor
+			a.total.UnresolvedAmountMinor += outstanding
 		}
-		accumulateBand(bands, t.Currency, now.Sub(t.DebitAt), t.AmountMinor)
+		accumulateBand(bands, t.Currency, now.Sub(t.DebitAt), outstanding)
 	}
 
 	totals := make([]report.ExposureTotal, 0, len(byCurrency))

@@ -35,10 +35,14 @@ func (p *Postgres) Exposure(ctx context.Context, tenantID string, scope report.S
 		SELECT currency,
 		       COUNT(*),
 		       COUNT(DISTINCT customer_ref_hash),
-		       COALESCE(SUM(amount_minor), 0),
+		       -- What left and has not arrived, not what was debited. Counting
+		       -- the full amount of a partly settled transaction would report
+		       -- money that did reach the destination as still outstanding.
+		       COALESCE(SUM(GREATEST(amount_minor - credited_minor, 0)), 0),
 		       MIN(debit_at),
 		       COUNT(*) FILTER (WHERE status = 'suspect'),
-		       COALESCE(SUM(amount_minor) FILTER (WHERE status = 'suspect'), 0)
+		       COALESCE(SUM(GREATEST(amount_minor - credited_minor, 0))
+		                FILTER (WHERE status = 'suspect'), 0)
 		FROM transactions `+where+`
 		GROUP BY currency`, tenantID)
 	if err != nil {
@@ -64,7 +68,7 @@ func (p *Postgres) Exposure(ctx context.Context, tenantID string, scope report.S
 	// disagree about a boundary, and so changing them is a one-line change in
 	// one place.
 	bandRows, err := p.pool.Query(ctx, `
-		SELECT currency, debit_at, amount_minor
+		SELECT currency, debit_at, GREATEST(amount_minor - credited_minor, 0)
 		FROM transactions `+where, tenantID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("exposure ages: %w", err)

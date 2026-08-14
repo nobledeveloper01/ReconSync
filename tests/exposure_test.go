@@ -284,3 +284,48 @@ func testExposure(t *testing.T, s store.Store) {
 		t.Errorf("tenant B saw %+v of tenant A's exposure (err=%v)", other, err)
 	}
 }
+
+// Adding partial settlement made this report wrong until it was fixed: it summed
+// the full debited amount, so a transaction where a fifth of the money arrived
+// was reported as fully outstanding. Exposure is what left and has not arrived.
+func testExposureCountsOnlyTheShortfall(t *testing.T, s store.Store) {
+	seedTenants(t, s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	txn := exposedTxn("EX-PART", "NGN", 5_000_000, time.Hour, false)
+	mustUpsert(t, s, txn)
+
+	// A fifth arrives, so four fifths are outstanding.
+	credit := &domain.CreditEvent{
+		TenantID: tenantA, TransactionID: "EX-PART", IdempotencyKey: "cp1",
+		CreditAt: now, Status: domain.CreditSuccess, AmountMinor: 1_000_000,
+	}
+	if _, err := s.ApplyPartialCredit(ctx, tenantA, credit); err != nil {
+		t.Fatalf("ApplyPartialCredit: %v", err)
+	}
+	if _, err := s.ClaimExpired(ctx, now, 100); err != nil {
+		t.Fatalf("ClaimExpired: %v", err)
+	}
+
+	totals, bands, err := s.Exposure(ctx, tenantA, report.ScopeAll, now)
+	if err != nil {
+		t.Fatalf("Exposure: %v", err)
+	}
+	if len(totals) != 1 {
+		t.Fatalf("totals = %+v", totals)
+	}
+	if totals[0].AmountMinor != 4_000_000 {
+		t.Errorf("exposure = %d, want 4000000 — the fifth that arrived is not outstanding",
+			totals[0].AmountMinor)
+	}
+	// The age breakdown has to agree with the total, or the report contradicts
+	// itself between two of its own sections.
+	var banded int64
+	for _, b := range bands {
+		banded += b.AmountMinor
+	}
+	if banded != totals[0].AmountMinor {
+		t.Errorf("age bands sum to %d but the total says %d", banded, totals[0].AmountMinor)
+	}
+}
