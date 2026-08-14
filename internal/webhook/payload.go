@@ -40,6 +40,16 @@ type Data struct {
 	Currency      string `json:"currency"`
 	Reason        string `json:"reason,omitempty"`
 
+	// CreditedMinor and OutstandingMinor appear only when part of the money
+	// arrived. Absent means none did, which is the ordinary case.
+	//
+	// They exist because advising a reversal of amount_minor when a fifth of it
+	// already reached the destination would have the receiver refund more than
+	// was lost. We do not decide what to reverse — but we must not state a
+	// number that is wrong to act on.
+	CreditedMinor    int64 `json:"credited_minor,omitempty"`
+	OutstandingMinor int64 `json:"outstanding_minor,omitempty"`
+
 	DebitAt       time.Time  `json:"debit_at"`
 	WindowSeconds int        `json:"window_seconds"`
 	DetectedAt    *time.Time `json:"detected_at,omitempty"`
@@ -83,7 +93,7 @@ func EnvelopeFor(event EventType, t *domain.Transaction, occurredAt time.Time, e
 	// either way, but a payload carrying "…+01:00" beside "…Z" is a
 	// side-by-side comparison a reader gets wrong, and a receiver comparing
 	// strings rather than parsing gets wrong too.
-	return Envelope{
+	out := Envelope{
 		Event:      event,
 		OccurredAt: occurredAt.UTC(),
 		Data: Data{
@@ -91,6 +101,7 @@ func EnvelopeFor(event EventType, t *domain.Transaction, occurredAt time.Time, e
 			AmountMinor:        t.AmountMinor,
 			Currency:           t.Currency,
 			Reason:             reasonFor(event),
+			CreditedMinor:      t.CreditedMinor,
 			DebitAt:            t.DebitAt.UTC(),
 			WindowSeconds:      int(t.Window() / time.Second),
 			DetectedAt:         utcOrNil(t.DetectedAt),
@@ -100,6 +111,17 @@ func EnvelopeFor(event EventType, t *domain.Transaction, occurredAt time.Time, e
 			Evidence:           ev.Signals(),
 		},
 	}
+
+	// A partly settled transaction is a different situation from one where
+	// nothing arrived, and saying "no credit confirmation" would be false:
+	// a credit was confirmed, just not all of it.
+	if t.CreditedMinor > 0 {
+		out.Data.OutstandingMinor = t.ShortfallMinor()
+		if event == EventReversalTriggered {
+			out.Data.Reason = "partial_settlement_outstanding"
+		}
+	}
+	return out
 }
 
 // IntegrationEnvelope is the body for an event about the stream itself. It has

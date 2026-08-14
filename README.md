@@ -211,6 +211,19 @@ destination as still outstanding. Exposure is now the shortfall — what left an
 has not arrived — and a test asserts the age bands sum to the same figure as the
 total, so the report cannot contradict itself between two of its own sections.
 
+It invalidated the **reversal advice** too, which is the more serious of the
+two because that is the message that causes money to move. It stated
+`amount_minor` alone, so a receiver acting on it would refund the whole debit
+when a fifth of it had already reached the destination — the over-payment this
+product exists to prevent, caused by our own advice. A partly settled
+transaction now carries `credited_minor` and `outstanding_minor`, its reason
+becomes `partial_settlement_outstanding` rather than the false
+`no_credit_confirmation_within_window`, and its evidence line reads *"only
+1000000 of 5000000 credited within 300s"* instead of *"no credit within 300s"*.
+
+Both fields are omitted when nothing arrived, so the payload an existing
+receiver sees is byte-for-byte what it always was.
+
 ### `internal/rules` — how long a transaction has
 
 Resolves the reconciliation window for a transaction. Rules match on transaction

@@ -2,12 +2,15 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
+	"github.com/nobledeveloper01/ReconSync/internal/webhook"
 )
 
 // amountCredit builds a credit that states how much arrived.
@@ -343,5 +346,129 @@ func TestReplayedCreditOverHTTPIsCountedOnce(t *testing.T) {
 	}
 	if got.Status == domain.StatusCompleted {
 		t.Error("a retried credit settled a transaction that is still short")
+	}
+}
+
+// The webhook is what actually causes money to move. Advising a reversal of the
+// full debit when part of it already reached the destination would have the
+// receiver refund more than was lost — the over-payment this product exists to
+// prevent, caused by our own advice.
+func TestReversalAdviceStatesWhatAlreadyArrived(t *testing.T) {
+	s := store.NewMemory()
+	seedTenants(t, s)
+	ctx := context.Background()
+	newEndpoint(t, s, tenantA, "we_1", "https://customer.example.com/hook")
+
+	mustUpsert(t, s, newExpiredTxn(tenantA, "TX-PART", 10*time.Minute, time.Minute))
+	if _, err := s.ApplyPartialCredit(ctx, tenantA, amountCredit("TX-PART", "cp", 1_000_000)); err != nil {
+		t.Fatalf("ApplyPartialCredit: %v", err)
+	}
+	if _, err := newDetector(t, s).Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	due, err := s.ClaimDueDeliveries(ctx, time.Now().UTC().Add(time.Minute), time.Minute, 10)
+	if err != nil {
+		t.Fatalf("ClaimDueDeliveries: %v", err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("queued %d deliveries, want 1", len(due))
+	}
+
+	var env webhook.Envelope
+	if err := json.Unmarshal(due[0].Payload, &env); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if env.Data.CreditedMinor != 1_000_000 {
+		t.Errorf("credited_minor = %d, want 1000000 — the receiver cannot see what arrived",
+			env.Data.CreditedMinor)
+	}
+	if env.Data.OutstandingMinor != 4_000_000 {
+		t.Errorf("outstanding_minor = %d, want 4000000", env.Data.OutstandingMinor)
+	}
+	// The debited amount is still stated, so the contract does not change for
+	// anyone reading it — but it is no longer the only number.
+	if env.Data.AmountMinor != 5_000_000 {
+		t.Errorf("amount_minor = %d, want the debited amount", env.Data.AmountMinor)
+	}
+	// And the reason must not claim no credit was confirmed, because one was.
+	if env.Data.Reason != "partial_settlement_outstanding" {
+		t.Errorf("reason = %q, want it to name the partial settlement", env.Data.Reason)
+	}
+}
+
+// A transaction where nothing arrived is unchanged: no new fields, same reason.
+func TestReversalAdviceIsUnchangedWhenNothingArrived(t *testing.T) {
+	s := store.NewMemory()
+	seedTenants(t, s)
+	ctx := context.Background()
+	newEndpoint(t, s, tenantA, "we_1", "https://customer.example.com/hook")
+	mustUpsert(t, s, newExpiredTxn(tenantA, "TX-NONE", 10*time.Minute, time.Minute))
+
+	if _, err := newDetector(t, s).Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	due, err := s.ClaimDueDeliveries(ctx, time.Now().UTC().Add(time.Minute), time.Minute, 10)
+	if err != nil {
+		t.Fatalf("ClaimDueDeliveries: %v", err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("queued %d, want 1", len(due))
+	}
+
+	// The optional fields must be absent, not zero, so an existing receiver
+	// sees exactly the payload it always saw.
+	body := string(due[0].Payload)
+	for _, field := range []string{"credited_minor", "outstanding_minor"} {
+		if strings.Contains(body, field) {
+			t.Errorf("%s appears on a transaction where nothing arrived: %s", field, body)
+		}
+	}
+	var env webhook.Envelope
+	if err := json.Unmarshal(due[0].Payload, &env); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if env.Data.Reason != "no_credit_confirmation_within_window" {
+		t.Errorf("reason = %q", env.Data.Reason)
+	}
+}
+
+// The evidence trail is what a compliance officer reads when asking why a
+// reversal was advised. "No credit within 300s" is false when part of the money
+// arrived.
+func TestEvidenceSaysWhatActuallyArrived(t *testing.T) {
+	s := store.NewMemory()
+	seedTenants(t, s)
+	ctx := context.Background()
+	newEndpoint(t, s, tenantA, "we_1", "https://customer.example.com/hook")
+
+	mustUpsert(t, s, newExpiredTxn(tenantA, "TX-EV", 10*time.Minute, time.Minute))
+	if _, err := s.ApplyPartialCredit(ctx, tenantA, amountCredit("TX-EV", "ce", 1_000_000)); err != nil {
+		t.Fatalf("ApplyPartialCredit: %v", err)
+	}
+	if _, err := newDetector(t, s).Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	due, err := s.ClaimDueDeliveries(ctx, time.Now().UTC().Add(time.Minute), time.Minute, 10)
+	if err != nil {
+		t.Fatalf("ClaimDueDeliveries: %v", err)
+	}
+	var env webhook.Envelope
+	if err := json.Unmarshal(due[0].Payload, &env); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+
+	var windowSignal string
+	for _, sig := range env.Data.Evidence {
+		if sig.Name == "window_expired" {
+			windowSignal = sig.Value
+		}
+	}
+	if strings.HasPrefix(windowSignal, "no credit") {
+		t.Errorf("evidence says %q, but a credit did arrive", windowSignal)
+	}
+	if !strings.Contains(windowSignal, "1000000") {
+		t.Errorf("evidence = %q, want it to state what arrived", windowSignal)
 	}
 }

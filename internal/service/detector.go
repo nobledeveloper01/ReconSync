@@ -518,9 +518,17 @@ func (d *Detector) recordSilence(ctx context.Context, event string, ep store.Sil
 // "we inferred this".
 func (d *Detector) baseEvidence(ctx context.Context, txn *domain.Transaction) *evidence.Set {
 	ev := evidence.New()
-	ev.Add(evidence.SignalWindowExpired,
-		fmt.Sprintf("no credit within %ds", int(txn.Window()/time.Second)),
-		evidence.WeightWindowExpired)
+
+	// Says what actually happened. "No credit within 300s" is false when part
+	// of the money arrived, and this line is what a compliance officer reads
+	// when asking why a reversal was advised.
+	window := int(txn.Window() / time.Second)
+	detail := fmt.Sprintf("no credit within %ds", window)
+	if txn.CreditedMinor > 0 {
+		detail = fmt.Sprintf("only %d of %d credited within %ds",
+			txn.CreditedMinor, txn.ExpectedCredit(), window)
+	}
+	ev.Add(evidence.SignalWindowExpired, detail, evidence.WeightWindowExpired)
 
 	gap, err := d.store.HasIngestGap(ctx, txn.TenantID, txn.DebitAt, txn.ExpectedCompletionAt)
 	switch {
