@@ -70,7 +70,11 @@ func TestExposureCountsCustomersAndAge(t *testing.T) {
 	seedTenants(t, s)
 	now := time.Now().UTC()
 
+	// Pinned to the same clock reading the assertion uses. Deriving it from a
+	// second time.Now() put the age either side of 71 days depending on
+	// sub-millisecond timing, which passed locally and failed in CI.
 	old := exposedTxn("OLD", "NGN", 1_000_000, 71*24*time.Hour, true)
+	old.DebitAt = now.Add(-71 * 24 * time.Hour)
 	recent := exposedTxn("NEW", "NGN", 2_000_000, time.Hour, true)
 	// Two transactions, one customer: a customer count that double-counts them
 	// would overstate the blast radius.
@@ -200,7 +204,13 @@ func TestExposureExcludesResolvedMoney(t *testing.T) {
 
 func TestIngestExposureReport(t *testing.T) {
 	f := newIngestFixture(t, fixtureOpts{})
-	expose(t, f.store, exposedTxn("TX-1", "NGN", 18_200_000_00, 71*24*time.Hour, true))
+
+	// A whole number of days back from a fixed reading, plus a margin, so the
+	// age cannot land either side of the boundary on a slow machine. The same
+	// pattern without the margin was a latent flake that fired in CI.
+	txn := exposedTxn("TX-1", "NGN", 18_200_000_00, 71*24*time.Hour, true)
+	txn.DebitAt = time.Now().UTC().Add(-71*24*time.Hour - time.Minute)
+	expose(t, f.store, txn)
 
 	w := f.do(t, http.MethodGet, "/v1/reports/exposure?scope=backfill", f.keyA, nil)
 	if w.Code != http.StatusOK {
