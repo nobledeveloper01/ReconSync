@@ -954,6 +954,34 @@ Two of those are shaped by the failure they exist to catch:
 `reconsync_orphans_without_endpoint_total` is worth watching too: it counts
 transactions detected as failed for a tenant with nowhere to deliver the news.
 
+### `reconsyncctl doctor` — the preflight for what fails silently
+
+Most of what can go wrong here does not announce itself. A schema the binary
+does not expect surfaces later as a missing column mid-transaction. A chain with
+no signed checkpoint verifies against itself forever while a rewrite goes
+undetected. A tenant with no enabled endpoint has its reversals detected,
+recorded, and told to nobody. Every one of those looks healthy from the inside.
+
+```
+✓ database reachable
+✓ schema up to date (10 migrations)
+✓ clock skew (0s)
+✓ webhook secret set
+! licence — expired 10 days ago — reports and audit verification are withheld.
+            Detection and reversals are unaffected
+! delivery targets — 1 tenant(s) have no enabled endpoint ([tnt_a]) — their
+            reversals are detected and recorded but nobody is told
+```
+
+**Failures and warnings are kept apart deliberately.** A failure means the
+deployment is broken now and exits non-zero; a warning means it is running with
+a guarantee switched off, which is a decision to make rather than a fault to fix.
+Reporting the second as the first trains people to ignore both.
+
+Checks that need the schema are skipped when the schema check fails — otherwise
+every one of them fails for the same reason and the cascade buries the one line
+that matters.
+
 ### `internal/licence` — what expiry does, and what it must never do
 
 Expiry withholds the **artefacts**: the compliance report, the exposure report,

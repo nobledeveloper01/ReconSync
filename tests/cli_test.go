@@ -255,3 +255,18 @@ func TestCLIKeysRejectsUnknownScopes(t *testing.T) {
 		t.Errorf("stderr = %q, want it to name the valid scopes", stderr)
 	}
 }
+
+// The preflight exists for the failure modes that are silent, so its own
+// reporting has to distinguish "broken now" from "running with a guarantee
+// switched off". Reporting the second as the first trains people to ignore both.
+func TestCLIDoctorSeparatesFailuresFromMissingGuarantees(t *testing.T) {
+	// No database: that is broken, not a missing guarantee, so it must exit
+	// non-zero and say which thing is wrong.
+	_, stderr, code := runCtl(t, "doctor")
+	if code == 0 {
+		t.Error("doctor passed with no database configured")
+	}
+	if !strings.Contains(strings.ToLower(stderr), "database") {
+		t.Errorf("stderr = %q, want it to name the database", stderr)
+	}
+}

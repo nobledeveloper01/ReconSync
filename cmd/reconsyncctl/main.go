@@ -161,57 +161,6 @@ func connect(ctx context.Context) (*pgxpool.Pool, error) {
 
 // doctor checks the things that make an install fail in ways the operator
 // cannot diagnose from the error alone (§6.3).
-func doctor(ctx context.Context) error {
-	pool, err := connect(ctx)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		return fmt.Errorf("database unreachable: %w", err)
-	}
-	fmt.Println("✓ database reachable")
-
-	// Every table the application writes to. A doctor that only knows half the
-	// schema reports health it has not checked, which is worse than not
-	// checking: an operator stops looking.
-	tables := []string{"tenants", "api_keys", "transactions", "pending_credits",
-		"reconciliation_rules", "webhook_endpoints", "webhook_deliveries", "audit_records",
-		"ingest_health", "tenant_silence", "reversal_claims", "audit_checkpoints"}
-	for _, table := range tables {
-		var exists bool
-		err := pool.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
-			 WHERE table_schema='public' AND table_name=$1)`, table).Scan(&exists)
-		if err != nil {
-			return fmt.Errorf("check table %s: %w", table, err)
-		}
-		if !exists {
-			return fmt.Errorf("table %q is missing — run the migrations in migrations/", table)
-		}
-	}
-	fmt.Printf("✓ schema present (%d tables)\n", len(tables))
-
-	// Clock skew breaks webhook signature verification with an error message
-	// that tells the operator nothing, so it is worth checking explicitly.
-	var dbNow time.Time
-	if err := pool.QueryRow(ctx, `SELECT now()`).Scan(&dbNow); err != nil {
-		return fmt.Errorf("read database time: %w", err)
-	}
-	skew := time.Since(dbNow)
-	if skew < 0 {
-		skew = -skew
-	}
-	if skew > 5*time.Second {
-		return fmt.Errorf("clock skew between this host and the database is %s — "+
-			"webhook signatures and reconciliation windows will misbehave", skew.Round(time.Millisecond))
-	}
-	fmt.Printf("✓ clock skew %s\n", skew.Round(time.Millisecond))
-
-	fmt.Println("\nreconsyncctl doctor: all checks passed")
-	return nil
-}
 
 func tenantCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("tenant create", flag.ContinueOnError)
