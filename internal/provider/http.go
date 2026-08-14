@@ -63,6 +63,11 @@ type HTTPConfig struct {
 
 	Timeout time.Duration
 	Client  *http.Client
+
+	// TLS carries the client certificate a bank issued us and the authority
+	// that signed theirs. Required by every bank and by NIBSS; ignored when a
+	// Client is supplied directly.
+	TLS TLSConfig
 }
 
 // HTTPProvider queries a JSON status endpoint.
@@ -101,7 +106,14 @@ func NewHTTP(cfg HTTPConfig) (*HTTPProvider, error) {
 		}
 		// Bounded on purpose: this runs inside the detection sweep, and a rail
 		// that hangs must not stall detection for every other tenant.
-		p.client = &http.Client{Timeout: timeout}
+		client, err := NewTLSClient(cfg.TLS, timeout)
+		if err != nil {
+			return nil, err
+		}
+		if client == nil {
+			client = &http.Client{Timeout: timeout}
+		}
+		p.client = client
 	}
 	return p, nil
 }

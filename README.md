@@ -347,6 +347,40 @@ credential. A named variable that is unset refuses to start, because an empty
 credential would make every query fail, and every failure is `unknown` — which
 would silently stop all reversals.
 
+#### Connecting to a bank at all
+
+Every Nigerian bank connection, and NIBSS itself, requires a **client
+certificate** the institution issues, usually against a private CA no public
+trust store carries. A plain HTTP client cannot make that connection, so the
+bank adapters were previously unreachable in principle rather than merely
+unconfigured.
+
+```json
+[{
+  "name": "sterling",
+  "url_template": "https://nip.sterling.internal/tsq/{reference}",
+  "client_cert_file": "/etc/reconsync/certs/reconsync.pem",
+  "client_key_file": "/etc/reconsync/certs/reconsync-key.pem",
+  "ca_file": "/etc/reconsync/certs/bank-ca.pem",
+  "tls_server_name": "nip.sterling.internal",
+  "status_path": "data.status",
+  "settled_values": ["successful"]
+}]
+```
+
+`tls_server_name` exists for the common bank-network case where the host you
+dial is on an IP allowlist but the certificate is issued to a name.
+
+**There is no option to skip verification, deliberately.** A bank connection
+that does not verify the far end is worse than no connection: it looks like
+corroboration from an authoritative source while being trivially spoofable, and
+this system turns that answer into money movement. A private authority means
+supplying its CA, not disabling the check.
+
+Half a keypair is a startup error rather than a handshake failure against the
+bank — the second is far harder to debug from the outside. Every connection
+failure is `unknown`, never a verdict.
+
 #### Settlement files, for the institutions with no API
 
 Most Nigerian banks will not give a fintech a status endpoint. Nearly all of them

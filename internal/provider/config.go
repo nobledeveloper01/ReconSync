@@ -36,6 +36,12 @@ type FileConfig struct {
 	FailedValues  []string `json:"failed_values,omitempty"`
 	TimeoutMS     int      `json:"timeout_ms,omitempty"`
 
+	// TLS carries the certificates a bank connection needs.
+	ClientCertFile string `json:"client_cert_file,omitempty"`
+	ClientKeyFile  string `json:"client_key_file,omitempty"`
+	CAFile         string `json:"ca_file,omitempty"`
+	ServerName     string `json:"tls_server_name,omitempty"`
+
 	// Settlement configures a kind:"settlement" rail.
 	Settlement *SettlementFileConfig `json:"settlement,omitempty"`
 }
