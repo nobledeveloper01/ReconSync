@@ -658,6 +658,17 @@ The deadline is a parameter, not a constant: the mandate differs by regulator an
 transaction type, and baking in one jurisdiction's number would quietly produce
 wrong reports everywhere else.
 
+**The CSV is written with `encoding/csv`, not string concatenation.** Every field
+in it is customer-controlled — a transaction id is validated for length and
+nothing else — so one containing a comma, a quote or a newline would silently
+misalign every column after it, in the document a regulator reads.
+
+Values beginning `=`, `+`, `-` or `@` are also prefixed with a quote. Excel and
+Sheets execute such a cell as a formula, and quoting the CSV does not prevent it:
+the formula runs after the file is parsed, when a compliance officer opens it. A
+transaction id of `=cmd|'/c calc'!A1` is a real payload, and this is an export
+built to be opened in a spreadsheet.
+
 Counts are aggregated in the database; only transactions that actually reached
 `orphaned` are fetched in full. A healthy tenant's millions of settled
 transactions never cross the wire to be counted.

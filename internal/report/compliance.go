@@ -8,8 +8,10 @@
 package report
 
 import (
-	"fmt"
+	"encoding/csv"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
@@ -274,15 +276,53 @@ func round1(v float64) float64 {
 }
 
 // CSV renders the breach list, which is the part a compliance team works from.
+//
+// Written with encoding/csv rather than string concatenation because every
+// field here is customer-controlled: a transaction id is validated for length
+// and nothing else, so one containing a comma, a quote or a newline would
+// silently misalign every column after it — in the document a regulator reads.
 func (r Report) CSV() string {
-	out := "transaction_id,status,amount_minor,currency,debit_at,detected_at,reversal_completed_at,elapsed_seconds,reason\n"
+	var out strings.Builder
+	w := csv.NewWriter(&out)
+
+	// Errors are ignored deliberately: a strings.Builder cannot fail, and the
+	// alternative is a returned error no caller could act on.
+	_ = w.Write([]string{"transaction_id", "status", "amount_minor", "currency",
+		"debit_at", "detected_at", "reversal_completed_at", "elapsed_seconds", "reason"})
+
 	for _, b := range r.Breaches {
-		out += fmt.Sprintf("%s,%s,%d,%s,%s,%s,%s,%.1f,%q\n",
-			b.TransactionID, b.Status, b.AmountMinor, b.Currency,
-			b.DebitAt.Format(time.RFC3339), formatPtr(b.DetectedAt), formatPtr(b.ReversalCompletedAt),
-			b.ElapsedSeconds, b.Reason)
+		_ = w.Write([]string{
+			csvSafe(b.TransactionID),
+			csvSafe(b.Status),
+			strconv.FormatInt(b.AmountMinor, 10),
+			csvSafe(b.Currency),
+			b.DebitAt.Format(time.RFC3339),
+			formatPtr(b.DetectedAt),
+			formatPtr(b.ReversalCompletedAt),
+			strconv.FormatFloat(b.ElapsedSeconds, 'f', 1, 64),
+			csvSafe(b.Reason),
+		})
 	}
-	return out
+	w.Flush()
+	return out.String()
+}
+
+// csvSafe neutralises a value a spreadsheet would execute.
+//
+// Excel and Sheets treat a cell beginning =, +, - or @ as a formula, so a
+// transaction id of "=cmd|'/c calc'!A1" runs when a compliance officer opens
+// the export. Quoting does not prevent it — the formula is evaluated after the
+// CSV is parsed — so the leading character has to be defused. A single quote
+// is the conventional guard and is invisible in the cell.
+func csvSafe(v string) string {
+	if v == "" {
+		return v
+	}
+	switch v[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + v
+	}
+	return v
 }
 
 func formatPtr(t *time.Time) string {

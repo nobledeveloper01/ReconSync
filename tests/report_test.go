@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"encoding/csv"
 	"strings"
 	"testing"
 	"time"
@@ -251,5 +252,55 @@ func TestComplianceCSV(t *testing.T) {
 	}
 	if !strings.Contains(csv, "LATE") {
 		t.Errorf("breach missing from CSV: %s", csv)
+	}
+}
+
+// Every field in this export is customer-controlled: a transaction id is
+// validated for length and nothing else. Built with string concatenation, one
+// containing a comma silently misaligns every column after it — in the document
+// a regulator reads.
+func TestComplianceCSVSurvivesHostileIdentifiers(t *testing.T) {
+	in := reportInput(reversed(`TX,"1`+"\n"+`INJECTED`, 96*time.Hour, 6*time.Minute, 72*time.Hour))
+	csvOut := report.Compute(in, 24*time.Hour, reportNow).CSV()
+
+	rows, err := csv.NewReader(strings.NewReader(csvOut)).ReadAll()
+	if err != nil {
+		t.Fatalf("the export is not parseable CSV: %v\n%s", err, csvOut)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want a header and one breach — the id broke the row structure", len(rows))
+	}
+	if len(rows[1]) != len(rows[0]) {
+		t.Fatalf("breach row has %d columns against %d in the header", len(rows[1]), len(rows[0]))
+	}
+	// The id survives intact rather than being mangled or split.
+	if !strings.Contains(rows[1][0], "INJECTED") {
+		t.Errorf("transaction_id came back as %q", rows[1][0])
+	}
+}
+
+// Excel and Sheets execute a cell beginning =, +, - or @. Quoting does not stop
+// it: the formula runs after the CSV is parsed, when a compliance officer opens
+// the file.
+func TestComplianceCSVDefusesSpreadsheetFormulas(t *testing.T) {
+	for _, id := range []string{`=cmd|'/c calc'!A1`, `+1+1`, `-2+3`, `@SUM(A1:A9)`} {
+		t.Run(id, func(t *testing.T) {
+			in := reportInput(reversed(id, 96*time.Hour, 6*time.Minute, 72*time.Hour))
+			csvOut := report.Compute(in, 24*time.Hour, reportNow).CSV()
+
+			rows, err := csv.NewReader(strings.NewReader(csvOut)).ReadAll()
+			if err != nil {
+				t.Fatalf("unparseable: %v", err)
+			}
+			cell := rows[1][0]
+			if strings.HasPrefix(cell, "=") || strings.HasPrefix(cell, "+") ||
+				strings.HasPrefix(cell, "-") || strings.HasPrefix(cell, "@") {
+				t.Errorf("cell %q would be executed as a formula", cell)
+			}
+			// Defused, not discarded: the original is still readable.
+			if !strings.Contains(cell, strings.TrimLeft(id, "=+-@")) {
+				t.Errorf("cell %q lost the original value", cell)
+			}
+		})
 	}
 }
