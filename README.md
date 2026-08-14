@@ -658,6 +658,20 @@ The deadline is a parameter, not a constant: the mandate differs by regulator an
 transaction type, and baking in one jurisdiction's number would quietly produce
 wrong reports everywhere else.
 
+`format=pdf` renders the same report as a document, because that is the form a
+regulator is sent one in. Written by hand rather than with a PDF library, for
+the same reason `/metrics` is: this needs text on a page, and a dependency is
+something a customer's security team has to approve.
+
+Three things in it are deliberate. The caveats — incomplete, truncated — sit
+**above** the numbers rather than in a footnote, so a reader who stops after the
+headline has not missed that it is a lower bound. Amounts are labelled
+**minor units** and not converted: the number of minor units per unit differs by
+currency and this system does not track it, so naming the unit is honest where
+guessing the exponent would risk a hundredfold misreading. And the column
+headers repeat on every page, because a reader who turns to page four should not
+have to go back to page one to know what a column is.
+
 **The CSV is written with `encoding/csv`, not string concatenation.** Every field
 in it is customer-controlled — a transaction id is validated for length and
 nothing else — so one containing a comma, a quote or a newline would silently
@@ -1521,10 +1535,9 @@ is delivered to the registered endpoint.
 | Settlement-file adapter — works for institutions with no API | Done |
 | Confidence score + evidence trail on every verdict | Done |
 | Audit hash chain + `GET /v1/audit/verify` | Done |
-| Reversal SLA compliance report (JSON + CSV) | Done |
+| Reversal SLA compliance report (JSON, CSV, PDF) | Done |
 | Signed chain checkpoints (Ed25519, `GET /v1/audit/checkpoints`) | Done |
 | Docker Compose quickstart | Done — verified end to end on Docker 29.5 |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API (`/v1/webhooks`) | Done |
-| PDF report export | **Not started** — JSON and CSV only |
 | Dashboard, SDKs | **Not started** |

@@ -906,11 +906,16 @@ func (s *Server) handleComplianceReport(w http.ResponseWriter, r *http.Request) 
 			fmt.Sprintf("attachment; filename=\"reversal-compliance-%s.csv\"", from.Format("2006-01-02")))
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, doc.CSV())
+	case "pdf":
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf("attachment; filename=\"reversal-compliance-%s.pdf\"", from.Format("2006-01-02")))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(doc.PDF())
+
 	default:
-		// PDF is in the specification but not built. Saying so beats returning
-		// something that is not a PDF under a pdf request.
 		s.writeError(w, r, http.StatusBadRequest, "invalid_request",
-			"format must be json or csv; pdf is not yet supported", "format")
+			"format must be json, csv or pdf", "format")
 	}
 }
 

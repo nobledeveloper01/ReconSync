@@ -1,7 +1,11 @@
 package tests
 
 import (
+	"bytes"
 	"encoding/csv"
+	"fmt"
+	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -302,5 +306,113 @@ func TestComplianceCSVDefusesSpreadsheetFormulas(t *testing.T) {
 				t.Errorf("cell %q lost the original value", cell)
 			}
 		})
+	}
+}
+
+// A PDF is what gets attached to an email and filed, so it has to be a document
+// a viewer will actually open — not merely bytes we called a PDF.
+func TestCompliancePDFIsAValidDocument(t *testing.T) {
+	r := report.Compute(reportInput(
+		reversed("TX-LATE", 96*time.Hour, 6*time.Minute, 72*time.Hour),
+	), 24*time.Hour, reportNow)
+
+	pdf := r.PDF()
+	if !bytes.HasPrefix(pdf, []byte("%PDF-1.4")) {
+		t.Fatalf("no PDF header: %q", pdf[:min(16, len(pdf))])
+	}
+	if !bytes.Contains(pdf, []byte("%%EOF")) {
+		t.Error("no EOF marker")
+	}
+	// The cross-reference table is what a viewer uses to find objects; a wrong
+	// offset renders as a blank or corrupt document rather than an error.
+	xrefAt := bytes.LastIndex(pdf, []byte("startxref"))
+	if xrefAt < 0 {
+		t.Fatal("no startxref")
+	}
+	var offset int
+	if _, err := fmt.Sscanf(string(pdf[xrefAt:]), "startxref\n%d", &offset); err != nil {
+		t.Fatalf("unreadable startxref: %v", err)
+	}
+	if offset <= 0 || offset >= len(pdf) {
+		t.Fatalf("startxref points to %d, outside a %d byte file", offset, len(pdf))
+	}
+	if !bytes.HasPrefix(pdf[offset:], []byte("xref")) {
+		t.Errorf("startxref points at %q, not the xref table", pdf[offset:min(offset+12, len(pdf))])
+	}
+
+	// The content a compliance officer is looking for.
+	// Escaped as it appears in the content stream — the escaping applies to our
+	// own header text as much as to a customer's identifier.
+	for _, want := range []string{"Reversal SLA Compliance Report", "TX-LATE", `Amount \(minor units\)`} {
+		if !bytes.Contains(pdf, []byte(want)) {
+			t.Errorf("document does not contain %q", want)
+		}
+	}
+}
+
+// Every value in the document is customer-controlled. A transaction id
+// containing a bracket would otherwise close the PDF string early and have the
+// rest parsed as operators — the same class of bug the CSV had.
+func TestCompliancePDFEscapesHostileIdentifiers(t *testing.T) {
+	r := report.Compute(reportInput(
+		reversed(`TX(evil)\ (Tj 0 0 Td (injected`, 96*time.Hour, 6*time.Minute, 72*time.Hour),
+	), 24*time.Hour, reportNow)
+
+	pdf := string(r.PDF())
+	// Each bracket and backslash from the id must appear escaped.
+	if strings.Contains(pdf, `(TX(evil)`) {
+		t.Error("an unescaped bracket from the transaction id reached the content stream")
+	}
+	if !strings.Contains(pdf, `TX\(evil\)`) {
+		t.Error("the transaction id was not escaped")
+	}
+	// Still a well-formed document afterwards.
+	if !strings.HasPrefix(pdf, "%PDF-1.4") || !strings.Contains(pdf, "%%EOF") {
+		t.Error("the document was corrupted by the identifier")
+	}
+}
+
+// A long report has to break across pages, and every page needs its headers or
+// page four is unreadable on its own.
+func TestCompliancePDFPaginates(t *testing.T) {
+	var txns []*domain.Transaction
+	for i := 0; i < 200; i++ {
+		txns = append(txns, reversed("TX", 96*time.Hour, 6*time.Minute, 72*time.Hour))
+	}
+	pdf := string(report.Compute(reportInput(txns...), 24*time.Hour, reportNow).PDF())
+
+	pages := strings.Count(pdf, "/Type /Page ")
+	if pages < 2 {
+		t.Fatalf("200 breaches produced %d page(s)", pages)
+	}
+	if got := strings.Count(pdf, "/Count "+strconv.Itoa(pages)); got != 1 {
+		t.Errorf("the page tree does not declare %d pages", pages)
+	}
+	// Headers repeated per page, not just once.
+	if strings.Count(pdf, "Amount \\(minor units\\)") < pages {
+		t.Error("column headers are missing from at least one page")
+	}
+}
+
+func TestIngestCompliancePDF(t *testing.T) {
+	f := newIngestFixture(t, fixtureOpts{})
+
+	w := f.do(t, http.MethodGet, "/v1/reports/reversal-compliance?format=pdf", f.keyA, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/pdf" {
+		t.Errorf("content-type = %q", ct)
+	}
+	if !strings.Contains(w.Header().Get("Content-Disposition"), ".pdf") {
+		t.Errorf("content-disposition = %q", w.Header().Get("Content-Disposition"))
+	}
+	if !bytes.HasPrefix(w.Body.Bytes(), []byte("%PDF")) {
+		t.Error("the body is not a PDF")
+	}
+
+	// An unknown format is still refused rather than silently served as JSON.
+	if w := f.do(t, http.MethodGet, "/v1/reports/reversal-compliance?format=xlsx", f.keyA, nil); w.Code != http.StatusBadRequest {
+		t.Errorf("unknown format = %d, want 400", w.Code)
 	}
 }

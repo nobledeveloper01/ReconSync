@@ -774,10 +774,14 @@ func TestIngestComplianceReport(t *testing.T) {
 		t.Errorf("csv missing the breach: %s", w.Body.String())
 	}
 
-	// PDF is in the specification but not built; say so rather than returning
-	// something that is not a PDF.
-	if w := f.do(t, http.MethodGet, "/v1/reports/reversal-compliance?format=pdf", f.keyA, nil); w.Code != http.StatusBadRequest {
-		t.Errorf("pdf = %d, want 400", w.Code)
+	// PDF is the form a regulator is sent one in, and is now built.
+	if w := f.do(t, http.MethodGet, "/v1/reports/reversal-compliance?format=pdf", f.keyA, nil); w.Code != http.StatusOK {
+		t.Errorf("pdf = %d, want 200", w.Code)
+	}
+	// A format we do not produce is still refused rather than silently served
+	// as JSON under a name that promises otherwise.
+	if w := f.do(t, http.MethodGet, "/v1/reports/reversal-compliance?format=xlsx", f.keyA, nil); w.Code != http.StatusBadRequest {
+		t.Errorf("xlsx = %d, want 400", w.Code)
 	}
 
 	for _, q := range []string{"?from=nonsense", "?deadline_seconds=0", "?from=2026-08-10&to=2026-08-01"} {
