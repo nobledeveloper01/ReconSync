@@ -163,6 +163,36 @@ This package also holds the **card-data screen**: a denylist of field names
 (`cvv`, `bvn`, `card_number`, …, matched with separators and case normalised)
 plus a Luhn check over 13–19 digit runs. We cannot leak what we never collected.
 
+### Partial settlements, fees, and splits
+
+Until recently a credit event carried **no amount at all**. A ₦50,000 debit
+settled by a ₦10,000 credit was marked `completed`, and the customer was quietly
+short ₦40,000. The product exists to notice a customer is out of pocket, and it
+could not notice being *partly* out of pocket.
+
+A credit may now state `amount_minor`, and a debit may state
+`expected_credit_minor` for the case where they differ:
+
+| Case | Behaviour |
+| --- | --- |
+| Credit with no amount | Settles in full — exactly as before, so no existing integration changes |
+| Credit short of expected | Stays open; the window still expires and reverses |
+| Several credits summing to expected | Settles once the total arrives |
+| Fee: debit 50,000, expect 49,750, credit 49,750 | Settles. The fee is not a shortfall |
+| More than expected | `suspect` — an overpayment is not a settlement and not a failure |
+
+**Accumulation had to be made idempotent, and that was not obvious.** The old
+path was replay-safe for free, because a settled transaction rejects further
+credits. A running total is not: the pipeline can legitimately deliver the same
+credit twice — one that overtakes its debit is parked and drained later, and a
+client retry is ordinary behaviour — and a second application would settle a
+₦20,000 transfer with a ₦10,000 credit. Every credit is now claimed by
+idempotency key in the same transaction as the accumulation.
+
+That bug reached a green test suite. It surfaced as a *flaky* test, and only
+after the failure message was made to print what it actually saw — a doubled
+total — rather than just that it had timed out.
+
 ### `internal/rules` — how long a transaction has
 
 Resolves the reconciliation window for a transaction. Rules match on transaction

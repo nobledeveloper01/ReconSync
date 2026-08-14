@@ -34,7 +34,8 @@ const transitionAttempts = 3
 const txnColumns = `id, tenant_id, transaction_id, idempotency_key, transaction_type,
 	provider, amount_minor, currency, status, debit_at, credit_at,
 	expected_completion_at, detected_at, reversal_triggered_at, reversal_completed_at,
-	customer_ref_hash, metadata, is_backfill, sla_warned_at, created_at, updated_at`
+	customer_ref_hash, metadata, is_backfill, sla_warned_at,
+	expected_credit_minor, credited_minor, created_at, updated_at`
 
 func (p *Postgres) EnsureTenant(ctx context.Context, id, name, environment string) error {
 	_, err := p.pool.Exec(ctx,
@@ -66,6 +67,10 @@ func (p *Postgres) UpsertDebits(ctx context.Context, tenantID string, txns []*do
 		// will not cast to jsonb[].
 		metas    = make([]string, 0, n)
 		backfill = make([]bool, 0, n)
+
+		// Pointers so "not stated" survives as NULL rather than collapsing into
+		// a declared expectation of zero.
+		expectedCredit = make([]*int64, 0, n)
 	)
 
 	var res UpsertResult
@@ -110,6 +115,14 @@ func (p *Postgres) UpsertDebits(ctx context.Context, tenantID string, txns []*do
 		refHashes = append(refHashes, t.CustomerRefHash)
 		metas = append(metas, string(raw))
 		backfill = append(backfill, t.IsBackfill)
+		// Nil rather than zero, so "not stated" stays distinguishable from a
+		// declared expectation of nothing.
+		if t.ExpectedCreditMinor > 0 {
+			v := t.ExpectedCreditMinor
+			expectedCredit = append(expectedCredit, &v)
+			continue
+		}
+		expectedCredit = append(expectedCredit, nil)
 	}
 
 	if len(txnIDs) == 0 {
@@ -120,21 +133,21 @@ func (p *Postgres) UpsertDebits(ctx context.Context, tenantID string, txns []*do
 		INSERT INTO transactions (
 			tenant_id, transaction_id, idempotency_key, transaction_type, provider,
 			amount_minor, currency, status, debit_at, expected_completion_at,
-			customer_ref_hash, metadata, is_backfill)
+			customer_ref_hash, metadata, is_backfill, expected_credit_minor)
 		SELECT $1, u.transaction_id, u.idempotency_key, u.transaction_type, u.provider,
 		       u.amount_minor, u.currency, $2, u.debit_at, u.expected_completion_at,
-		       u.customer_ref_hash, u.metadata, u.is_backfill
+		       u.customer_ref_hash, u.metadata, u.is_backfill, u.expected_credit_minor
 		FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::bigint[],
 		            $8::text[], $9::timestamptz[], $10::timestamptz[], $11::text[],
-		            $12::jsonb[], $13::boolean[])
+		            $12::jsonb[], $13::boolean[], $14::bigint[])
 		     AS u(transaction_id, idempotency_key, transaction_type, provider,
 		          amount_minor, currency, debit_at, expected_completion_at,
-		          customer_ref_hash, metadata, is_backfill)
+		          customer_ref_hash, metadata, is_backfill, expected_credit_minor)
 		ON CONFLICT DO NOTHING
 		RETURNING transaction_id`,
 		tenantID, string(domain.StatusPendingDebit),
 		txnIDs, idemKeys, types, providers, amounts, curr,
-		debitAt, expectAt, refHashes, metas, backfill)
+		debitAt, expectAt, refHashes, metas, backfill, expectedCredit)
 	if err != nil {
 		return UpsertResult{}, fmt.Errorf("upsert debits: %w", err)
 	}
@@ -353,10 +366,12 @@ func (p *Postgres) ParkCredit(ctx context.Context, tenantID string, ev *domain.C
 	}
 	_, err := p.pool.Exec(ctx, `
 		INSERT INTO pending_credits (
-			tenant_id, transaction_id, idempotency_key, credit_at, provider_reference, status)
-		VALUES ($1, $2, $3, $4, $5, $6)
+			tenant_id, transaction_id, idempotency_key, credit_at, provider_reference,
+			status, amount_minor)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (tenant_id, transaction_id) DO NOTHING`,
-		tenantID, ev.TransactionID, ev.IdempotencyKey, ev.CreditAt, ev.ProviderReference, string(ev.Status))
+		tenantID, ev.TransactionID, ev.IdempotencyKey, ev.CreditAt, ev.ProviderReference,
+		string(ev.Status), ev.AmountMinor)
 	if err != nil {
 		return fmt.Errorf("park credit: %w", err)
 	}
@@ -378,7 +393,7 @@ func (p *Postgres) PeekParkedCredits(ctx context.Context, tenantID string, trans
 		return nil, nil
 	}
 	rows, err := p.pool.Query(ctx, `
-		SELECT transaction_id, idempotency_key, credit_at, provider_reference, status
+		SELECT transaction_id, idempotency_key, credit_at, provider_reference, status, amount_minor
 		FROM pending_credits
 		WHERE tenant_id = $1 AND transaction_id = ANY($2)`,
 		tenantID, transactionIDs)
@@ -391,7 +406,8 @@ func (p *Postgres) PeekParkedCredits(ctx context.Context, tenantID string, trans
 	for rows.Next() {
 		ev := &domain.CreditEvent{TenantID: tenantID}
 		var status string
-		if err := rows.Scan(&ev.TransactionID, &ev.IdempotencyKey, &ev.CreditAt, &ev.ProviderReference, &status); err != nil {
+		if err := rows.Scan(&ev.TransactionID, &ev.IdempotencyKey, &ev.CreditAt,
+			&ev.ProviderReference, &status, &ev.AmountMinor); err != nil {
 			return nil, fmt.Errorf("scan parked credit: %w", err)
 		}
 		ev.Status = domain.CreditStatus(status)
@@ -439,6 +455,84 @@ func (p *Postgres) ListByStatus(ctx context.Context, tenantID string, status dom
 
 // ClaimExpired implements the §4.4 sweep. SKIP LOCKED makes it safe across
 // replicas with no leader election.
+// ApplyPartialCredit accumulates a credit and settles only when the whole
+// expected amount has arrived.
+//
+// The accumulation and the decision happen in one statement. Splitting them
+// would let two credits for the same transaction each read the old total,
+// each conclude the transaction is still short, and leave it open with the
+// money fully arrived — which the sweep would then reverse.
+func (p *Postgres) ApplyPartialCredit(ctx context.Context, tenantID string, c *domain.CreditEvent) (*domain.Transaction, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin partial credit: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Claim the credit first. A second delivery of the same one inserts
+	// nothing, and must not move the total.
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO credit_applications (tenant_id, idempotency_key, transaction_id, amount_minor)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (tenant_id, idempotency_key) DO NOTHING`,
+		tenantID, c.IdempotencyKey, c.TransactionID, c.AmountMinor)
+	if err != nil {
+		return nil, fmt.Errorf("record credit application: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Already counted. Report the transaction as it stands rather than
+		// erroring: a replay is ordinary client behaviour.
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit partial credit: %w", err)
+		}
+		return p.Get(ctx, tenantID, c.TransactionID)
+	}
+
+	transactionID, amountMinor, creditAt := c.TransactionID, c.AmountMinor, c.CreditAt
+	rows, err := tx.Query(ctx, `
+		UPDATE transactions t
+		SET credited_minor = t.credited_minor + $3,
+		    credit_at = $4,
+		    updated_at = now(),
+		    status = CASE
+		        -- More arrived than was ever expected. Not a settlement and not
+		        -- a failure: a human decides what an overpayment means.
+		        WHEN t.credited_minor + $3 > COALESCE(t.expected_credit_minor, t.amount_minor) THEN 'suspect'
+		        WHEN t.credited_minor + $3 = COALESCE(t.expected_credit_minor, t.amount_minor) THEN 'completed'
+		        -- Still short, so the transaction stays open and its window can
+		        -- still expire. A partial settlement is money outstanding.
+		        ELSE t.status
+		    END
+		WHERE t.tenant_id = $1 AND t.transaction_id = $2
+		  AND t.status IN ('pending_debit', 'pending_unknown')
+		RETURNING `+txnColumns, tenantID, transactionID, amountMinor, creditAt.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("apply partial credit: %w", err)
+	}
+	defer rows.Close()
+
+	out, err := collectTransactions(rows)
+	if err != nil {
+		return nil, err
+	}
+	rows.Close()
+
+	if len(out) == 0 {
+		// Either it does not exist, or it is already closed. Rolling back
+		// releases the credit claim so a genuine later delivery still counts.
+		_ = tx.Rollback(ctx)
+		existing, err := p.Get(ctx, tenantID, transactionID)
+		if err != nil {
+			return nil, err
+		}
+		return nil, domain.InvalidTransitionError{From: existing.Status, To: domain.StatusCompleted}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit partial credit: %w", err)
+	}
+	return out[0], nil
+}
+
 // slaAtRiskStatuses are the states in which the customer's money is still out.
 //
 // Exactly the set the exposure report counts and the compliance report will
@@ -532,18 +626,24 @@ type scanner interface {
 
 func scanTransaction(row scanner) (*domain.Transaction, error) {
 	var (
-		t       domain.Transaction
-		status  string
-		rawMeta []byte
+		t              domain.Transaction
+		status         string
+		rawMeta        []byte
+		expectedCredit *int64
 	)
 	err := row.Scan(
 		&t.ID, &t.TenantID, &t.TransactionID, &t.IdempotencyKey, &t.TransactionType,
 		&t.Provider, &t.AmountMinor, &t.Currency, &status, &t.DebitAt, &t.CreditAt,
 		&t.ExpectedCompletionAt, &t.DetectedAt, &t.ReversalTriggeredAt, &t.ReversalCompletedAt,
-		&t.CustomerRefHash, &rawMeta, &t.IsBackfill, &t.SLAWarnedAt, &t.CreatedAt, &t.UpdatedAt,
+		&t.CustomerRefHash, &rawMeta, &t.IsBackfill, &t.SLAWarnedAt,
+		&expectedCredit, &t.CreditedMinor, &t.CreatedAt, &t.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	if expectedCredit != nil {
+		t.ExpectedCreditMinor = *expectedCredit
 	}
 
 	t.Status = domain.Status(status)

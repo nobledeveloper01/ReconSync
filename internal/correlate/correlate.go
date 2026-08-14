@@ -237,7 +237,15 @@ func (e *Engine) tryApply(ctx context.Context, tenantID string, c *domain.Credit
 		return creditIgnored, fmt.Errorf("credit %s: %w", c.TransactionID, err)
 	}
 
-	_, err = e.store.ApplyCredit(ctx, tenantID, c.TransactionID, target, c.CreditAt)
+	// A credit that states its amount goes through the accumulating path, which
+	// settles only once the whole expected amount has arrived. One that does
+	// not behaves exactly as it always has: the amount is assumed to be the
+	// whole of it, which was the silent assumption before the field existed.
+	if c.AmountMinor > 0 && target == domain.StatusCompleted {
+		_, err = e.store.ApplyPartialCredit(ctx, tenantID, c)
+	} else {
+		_, err = e.store.ApplyCredit(ctx, tenantID, c.TransactionID, target, c.CreditAt)
+	}
 	switch {
 	case err == nil:
 		return creditApplied, nil
@@ -267,18 +275,19 @@ func (e *Engine) toTransaction(d *domain.DebitEvent, ruleSet *rules.Set, salt st
 	}
 
 	txn := &domain.Transaction{
-		TenantID:        d.TenantID,
-		TransactionID:   d.TransactionID,
-		IdempotencyKey:  d.IdempotencyKey,
-		TransactionType: d.TransactionType,
-		Provider:        d.Provider,
-		AmountMinor:     d.AmountMinor,
-		Currency:        d.Currency,
-		Status:          domain.StatusPendingDebit,
-		DebitAt:         d.DebitAt,
-		Metadata:        d.Metadata,
-		IsBackfill:      d.IsBackfill,
-		CustomerRefHash: HashCustomerRef(salt, d.CustomerRef),
+		TenantID:            d.TenantID,
+		TransactionID:       d.TransactionID,
+		IdempotencyKey:      d.IdempotencyKey,
+		TransactionType:     d.TransactionType,
+		Provider:            d.Provider,
+		AmountMinor:         d.AmountMinor,
+		Currency:            d.Currency,
+		Status:              domain.StatusPendingDebit,
+		DebitAt:             d.DebitAt,
+		Metadata:            d.Metadata,
+		ExpectedCreditMinor: d.ExpectedCreditMinor,
+		IsBackfill:          d.IsBackfill,
+		CustomerRefHash:     HashCustomerRef(salt, d.CustomerRef),
 	}
 
 	res := ruleSet.Resolve(txn)

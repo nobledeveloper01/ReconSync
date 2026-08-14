@@ -45,6 +45,18 @@ type TransactionStore interface {
 	// Returns ErrNotFound, or domain.InvalidTransitionError if the edge is illegal.
 	ApplyCredit(ctx context.Context, tenantID, transactionID string, target domain.Status, creditAt time.Time) (*domain.Transaction, error)
 
+	// ApplyPartialCredit accumulates a credit that states its amount, and
+	// settles the transaction only once the whole expected amount has arrived.
+	//
+	// Separate from ApplyCredit because the decision moves: ApplyCredit is told
+	// which status to move to, while here the running total decides. Doing the
+	// accumulation and the decision in one guarded statement is what stops a
+	// second credit racing the first and both concluding "still short".
+	// The idempotency key is what makes accumulation safe: the pipeline can
+	// legitimately deliver the same credit twice — parked then drained, or a
+	// client retry — and a running total would add it twice.
+	ApplyPartialCredit(ctx context.Context, tenantID string, c *domain.CreditEvent) (*domain.Transaction, error)
+
 	// MarkSettled closes an orphan the rail has since confirmed arrived, so no
 	// reversal is sent (ADR-0005).
 	MarkSettled(ctx context.Context, tenantID, transactionID string, at time.Time) (*domain.Transaction, error)

@@ -35,6 +35,11 @@ type debitRequest struct {
 	CustomerRef     string         `json:"customer_ref"`
 	Metadata        map[string]any `json:"metadata"`
 	Backfill        bool           `json:"backfill"`
+
+	// ExpectedCreditMinor is what should arrive when that differs from what was
+	// debited — a transfer with a fee credits less than it debits, and that is
+	// correct rather than short. Omit it for a transfer with no fee.
+	ExpectedCreditMinor int64 `json:"expected_credit_minor,omitempty"`
 }
 
 type creditRequest struct {
@@ -43,6 +48,11 @@ type creditRequest struct {
 	CreditAt          time.Time `json:"credit_at"`
 	ProviderReference string    `json:"provider_reference"`
 	Status            string    `json:"status"`
+
+	// AmountMinor is what actually arrived. Optional: omitting it means "the
+	// whole amount", which is what the system assumed silently before this
+	// field existed.
+	AmountMinor int64 `json:"amount_minor,omitempty"`
 }
 
 type reversalCompletedRequest struct {
@@ -1021,17 +1031,18 @@ func (s *Server) writeLoopMetrics(out *strings.Builder) {
 
 func (s *Server) toDebitEvent(tenantID, idemKey string, req *debitRequest) (*domain.DebitEvent, error) {
 	ev := &domain.DebitEvent{
-		TenantID:        tenantID,
-		TransactionID:   req.TransactionID,
-		IdempotencyKey:  idemKey,
-		TransactionType: req.TransactionType,
-		Provider:        req.Provider,
-		AmountMinor:     req.AmountMinor,
-		Currency:        req.Currency,
-		DebitAt:         req.DebitAt.UTC(),
-		CustomerRef:     req.CustomerRef,
-		Metadata:        req.Metadata,
-		IsBackfill:      req.Backfill,
+		TenantID:            tenantID,
+		TransactionID:       req.TransactionID,
+		IdempotencyKey:      idemKey,
+		TransactionType:     req.TransactionType,
+		Provider:            req.Provider,
+		AmountMinor:         req.AmountMinor,
+		Currency:            req.Currency,
+		DebitAt:             req.DebitAt.UTC(),
+		CustomerRef:         req.CustomerRef,
+		Metadata:            req.Metadata,
+		ExpectedCreditMinor: req.ExpectedCreditMinor,
+		IsBackfill:          req.Backfill,
 	}
 	if err := ev.Validate(); err != nil {
 		return nil, err
@@ -1058,6 +1069,7 @@ func (s *Server) toCreditEvent(tenantID, idemKey string, req *creditRequest) (*d
 		CreditAt:          req.CreditAt.UTC(),
 		ProviderReference: req.ProviderReference,
 		Status:            domain.CreditStatus(req.Status),
+		AmountMinor:       req.AmountMinor,
 	}
 	if ev.CreditAt.IsZero() {
 		ev.CreditAt = s.now().UTC()

@@ -62,6 +62,15 @@ type Transaction struct {
 	// hold the plaintext.
 	CustomerRefHash string
 
+	// ExpectedCreditMinor is what should arrive, which is not always what was
+	// debited: a transfer with a fee credits less than it debits, and that is
+	// correct rather than short. Zero means the debited amount.
+	ExpectedCreditMinor int64
+
+	// CreditedMinor is what has arrived so far, accumulated across credits so a
+	// split settlement adds up rather than the last one winning.
+	CreditedMinor int64
+
 	Metadata   map[string]any
 	IsBackfill bool
 
@@ -100,6 +109,10 @@ type DebitEvent struct {
 
 	Metadata map[string]any
 
+	// ExpectedCreditMinor is what should arrive when that differs from what was
+	// debited, e.g. a transfer with a fee. Zero means the debited amount.
+	ExpectedCreditMinor int64
+
 	// IsBackfill marks a historical replay. Never triggers webhooks (§3.2 A3).
 	IsBackfill bool
 }
@@ -112,6 +125,29 @@ type CreditEvent struct {
 	CreditAt          time.Time
 	ProviderReference string
 	Status            CreditStatus
+
+	// AmountMinor is what actually arrived. Zero means the client did not say,
+	// which is how every existing integration behaves and is treated as "the
+	// whole amount" — the assumption the system made silently before this
+	// field existed, now made explicit.
+	AmountMinor int64
+}
+
+// ExpectedCredit is what should arrive for this transaction.
+func (t *Transaction) ExpectedCredit() int64 {
+	if t.ExpectedCreditMinor > 0 {
+		return t.ExpectedCreditMinor
+	}
+	return t.AmountMinor
+}
+
+// ShortfallMinor is how much of the expected credit has not arrived.
+func (t *Transaction) ShortfallMinor() int64 {
+	short := t.ExpectedCredit() - t.CreditedMinor
+	if short < 0 {
+		return 0
+	}
+	return short
 }
 
 // ReversalCompletedEvent reports the customer finished reversing (§3.2 C2).

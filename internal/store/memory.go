@@ -47,6 +47,9 @@ type Memory struct {
 	// reversal claims by tenant and transaction
 	claims map[claimKey]*ReversalClaim
 
+	// credit idempotency keys already counted, per tenant
+	applied map[string]map[string]struct{}
+
 	// per-tenant audit chain, in sequence order
 	audit map[string][]audit.Record
 
@@ -74,6 +77,7 @@ func NewMemory() *Memory {
 		health:      make(map[healthKey]IngestSample),
 		silence:     make(map[string]time.Time),
 		claims:      make(map[claimKey]*ReversalClaim),
+		applied:     make(map[string]map[string]struct{}),
 		audit:       make(map[string][]audit.Record),
 		checkpoints: make(map[string][]audit.Checkpoint),
 	}
@@ -145,6 +149,51 @@ func (m *Memory) ApplyCredit(_ context.Context, tenantID, transactionID string, 
 	if target == domain.StatusOrphaned {
 		detected := stored.UpdatedAt
 		stored.DetectedAt = &detected
+	}
+
+	out := *stored
+	return &out, nil
+}
+
+// ApplyPartialCredit accumulates a credit and settles only once the whole
+// expected amount has arrived.
+func (m *Memory) ApplyPartialCredit(_ context.Context, tenantID string, c *domain.CreditEvent) (*domain.Transaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	transactionID, amountMinor, creditAt := c.TransactionID, c.AmountMinor, c.CreditAt
+
+	stored, ok := m.byTenant[tenantID][transactionID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if stored.Status != domain.StatusPendingDebit && stored.Status != domain.StatusPendingUnknown {
+		return nil, domain.InvalidTransitionError{From: stored.Status, To: domain.StatusCompleted}
+	}
+
+	// Already counted: a replay must not move the total.
+	if m.applied[tenantID] == nil {
+		m.applied[tenantID] = map[string]struct{}{}
+	}
+	if _, seen := m.applied[tenantID][c.IdempotencyKey]; seen {
+		out := *stored
+		return &out, nil
+	}
+	m.applied[tenantID][c.IdempotencyKey] = struct{}{}
+
+	stored.CreditedMinor += amountMinor
+	at := creditAt.UTC()
+	stored.CreditAt = &at
+	stored.UpdatedAt = time.Now().UTC()
+
+	switch expected := stored.ExpectedCredit(); {
+	case stored.CreditedMinor > expected:
+		// More arrived than was ever expected: not a settlement, not a failure.
+		stored.Status = domain.StatusSuspect
+	case stored.CreditedMinor == expected:
+		stored.Status = domain.StatusCompleted
+	default:
+		// Still short, so it stays open and its window can still expire.
 	}
 
 	out := *stored
