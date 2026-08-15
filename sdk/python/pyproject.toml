@@ -7,10 +7,13 @@ name = "reconsync"
 version = "0.1.0"
 description = "Report transaction legs to ReconSync and verify its reversal webhooks."
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 keywords = ["reconciliation", "webhooks", "payments", "fintech", "reversal"]
 classifiers = [
   "Intended Audience :: Developers",
+  "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3",
   "Topic :: Office/Business :: Financial",
   "Typing :: Typed",

@@ -11,7 +11,7 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "LICENSE"],
   "keywords": ["reconciliation", "webhooks", "payments", "fintech", "reversal"],
   "repository": {
     "type": "git",
@@ -30,5 +30,5 @@
     "@types/node": "^22.10.0",
     "typescript": "~5.7.0"
   },
-  "license": "SEE LICENSE IN ../../LICENSE"
+  "license": "Apache-2.0"
 }

@@ -1745,11 +1745,35 @@ migrations/          schema, embedded in the binary and applied by a ledger
 internal/migrate/    the migration runner: once each, in order, idempotent
 web/                 the dashboard: Vite + TypeScript, no runtime dependencies
 tests/               the whole suite, exercising only the exported API
+LICENSE              BUSL-1.1 for the server, converting to Apache-2.0 in 2030
+sdk/LICENSE          Apache-2.0 for the client libraries
 ```
 
 ---
 
-## 11. Status
+## 11. Licensing
+
+Two licences, because the two halves have opposite jobs.
+
+**The server is under the [Business Source License 1.1](LICENSE).** You may run
+it in production to reconcile your own transactions and your own customers',
+including as part of a service you provide them. You may not offer ReconSync
+itself to third parties as a hosted reconciliation service. On **2030-08-15** it
+converts to Apache-2.0 automatically, and that date moves forward with each
+release — so the terms have an end, and a customer who outlives the company still
+gets an open licence rather than an orphaned binary.
+
+**The client libraries are Apache-2.0**: [`sdk/`](sdk/) and
+[`pkg/reconsync`](pkg/reconsync/), including the patent grant. Anyone integrating
+with ReconSync should be able to use them without a lawyer, and a receiver that
+cannot freely verify a signature would rewrite the verification badly.
+
+That split is deliberate. The value being sold is the server and the evidence it
+produces; nothing is gained by making the client side awkward to adopt.
+
+---
+
+## 12. Status
 
 Working end to end: a debit whose window closes is detected, and a signed webhook
 is delivered to the registered endpoint.

@@ -12,6 +12,10 @@ do the same two things and make the same two promises.
 The Go package works today. Node and Python can be installed from this
 repository until they are published; each README says how.
 
+**Apache-2.0**, including the patent grant — deliberately more permissive than
+the server, which is under the Business Source License. Integrating should not
+need a lawyer.
+
 **No dependencies.** Every one is standard library only. This code goes into a
 payment service, where each package added is one a security team has to approve.
 
