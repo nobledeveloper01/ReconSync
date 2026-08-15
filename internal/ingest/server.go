@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nobledeveloper01/ReconSync/internal/account"
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/domain"
 	"github.com/nobledeveloper01/ReconSync/internal/drill"
@@ -80,6 +81,11 @@ type Options struct {
 	// dashboard, which is what a headless deployment wants.
 	Dashboard DashboardFS
 
+	// Accounts backs signing in with an email and password. Nil serves the API
+	// to API keys only, which is what a headless deployment wants and what
+	// every deployment had before user accounts existed.
+	Accounts *account.Service
+
 	// Ready reports dependency health for /readyz. Liveness never calls it.
 	Ready func(ctx context.Context) error
 
@@ -113,6 +119,8 @@ type Server struct {
 	licence   *licence.Checker
 	dashboard DashboardFS
 	auth      *auth.Authenticator
+	accounts  *account.Service
+	logins    *loginLimiter
 	ready     func(ctx context.Context) error
 	log       *slog.Logger
 	now       func() time.Time
@@ -149,6 +157,8 @@ func New(opts Options) (*Server, error) {
 		licence:     opts.Licence,
 		dashboard:   opts.Dashboard,
 		auth:        opts.Auth,
+		accounts:    opts.Accounts,
+		logins:      newLoginLimiter(),
 		ready:       opts.Ready,
 		log:         opts.Logger,
 		now:         opts.Now,
@@ -181,33 +191,65 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) routes() http.Handler {
-	// Authenticated surface.
+	read := auth.ScopeReportsRead
+	write := auth.ScopeEventsWrite
+	admin := auth.ScopeEndpointsWrite
+
+	// Authenticated surface. Each route declares the scope it needs, so the
+	// permission is visible next to the path rather than buried in a handler —
+	// and a new route cannot be added without deciding who may call it.
 	api := http.NewServeMux()
-	api.HandleFunc("POST /v1/events/debit", s.handleDebit)
-	api.HandleFunc("POST /v1/events/credit", s.handleCredit)
-	api.HandleFunc("POST /v1/events/bulk", s.handleBulk)
-	api.HandleFunc("POST /v1/events/reversal-completed", s.handleReversalCompleted)
-	api.HandleFunc("GET /v1/transactions", s.handleListTransactions)
-	api.HandleFunc("GET /v1/transactions/{transaction_id}", s.handleGetTransaction)
-	api.HandleFunc("GET /v1/licence", s.handleLicence)
-	api.HandleFunc("GET /v1/audit/verify", s.handleAuditVerify)
-	api.HandleFunc("GET /v1/audit/checkpoints", s.handleAuditCheckpoints)
-	api.HandleFunc("GET /v1/reports/reversal-compliance", s.handleComplianceReport)
-	api.HandleFunc("GET /v1/reports/providers", s.handleProviderScorecard)
-	api.HandleFunc("GET /v1/reports/exposure", s.handleExposure)
-	api.HandleFunc("GET /v1/reports/window-fit", s.handleWindowFit)
-	api.HandleFunc("POST /v1/fire-drill", s.handleFireDrill)
-	api.HandleFunc("POST /v1/reversals/{transaction_id}/claim", s.handleClaimReversal)
-	api.HandleFunc("POST /v1/reversals/{transaction_id}/claim/release", s.handleReleaseReversalClaim)
-	if opts := s.webhooks; opts != nil {
-		api.HandleFunc("GET /v1/webhooks", s.handleListWebhooks)
-		api.HandleFunc("POST /v1/webhooks", s.handleCreateWebhook)
-		api.HandleFunc("PATCH /v1/webhooks/{endpoint_id}", s.handlePatchWebhook)
-		api.HandleFunc("DELETE /v1/webhooks/{endpoint_id}", s.handleDeleteWebhook)
+	api.Handle("POST /v1/events/debit", s.need(write, s.handleDebit))
+	api.Handle("POST /v1/events/credit", s.need(write, s.handleCredit))
+	api.Handle("POST /v1/events/bulk", s.need(write, s.handleBulk))
+	api.Handle("POST /v1/events/reversal-completed", s.need(write, s.handleReversalCompleted))
+	api.Handle("GET /v1/transactions", s.need(read, s.handleListTransactions))
+	api.Handle("GET /v1/transactions/{transaction_id}", s.need(read, s.handleGetTransaction))
+	api.Handle("GET /v1/licence", s.need(read, s.handleLicence))
+	api.Handle("GET /v1/audit/verify", s.need(read, s.handleAuditVerify))
+	api.Handle("GET /v1/audit/checkpoints", s.need(read, s.handleAuditCheckpoints))
+	api.Handle("GET /v1/reports/reversal-compliance", s.need(read, s.handleComplianceReport))
+	api.Handle("GET /v1/reports/providers", s.need(read, s.handleProviderScorecard))
+	api.Handle("GET /v1/reports/exposure", s.need(read, s.handleExposure))
+	api.Handle("GET /v1/reports/window-fit", s.need(read, s.handleWindowFit))
+	api.Handle("POST /v1/fire-drill", s.need(write, s.handleFireDrill))
+	api.Handle("POST /v1/reversals/{transaction_id}/claim", s.need(write, s.handleClaimReversal))
+	api.Handle("POST /v1/reversals/{transaction_id}/claim/release", s.need(write, s.handleReleaseReversalClaim))
+	if s.webhooks != nil {
+		// Reading the list is reading; changing it decides where every reversal
+		// payload goes, which is why only that half needs an admin.
+		api.Handle("GET /v1/webhooks", s.need(read, s.handleListWebhooks))
+		api.Handle("POST /v1/webhooks", s.need(admin, s.handleCreateWebhook))
+		api.Handle("PATCH /v1/webhooks/{endpoint_id}", s.need(admin, s.handlePatchWebhook))
+		api.Handle("DELETE /v1/webhooks/{endpoint_id}", s.need(admin, s.handleDeleteWebhook))
 	}
+
+	// The account a signed-in person manages. Any role may change their own
+	// password and their own second factor — those are not privileges, they are
+	// the means of keeping the account theirs.
+	api.HandleFunc("GET /v1/auth/me", s.handleMe)
+	api.HandleFunc("POST /v1/auth/logout", s.handleLogout)
+	api.HandleFunc("POST /v1/auth/password", s.handleChangePassword)
+	api.HandleFunc("POST /v1/auth/totp/begin", s.handleTOTPBegin)
+	api.HandleFunc("POST /v1/auth/totp/confirm", s.handleTOTPConfirm)
+	api.HandleFunc("POST /v1/auth/totp/disable", s.handleTOTPDisable)
+	api.HandleFunc("GET /v1/auth/sessions", s.handleListSessions)
+	api.HandleFunc("DELETE /v1/auth/sessions", s.handleRevokeSessions)
+
+	// User administration checks the admin role inside each handler, because it
+	// also has to scope every lookup to the caller's tenant.
+	api.HandleFunc("GET /v1/users", s.handleListUsers)
+	api.HandleFunc("POST /v1/users", s.handleCreateUser)
+	api.HandleFunc("PATCH /v1/users/{user_id}", s.handleUpdateUser)
+	api.HandleFunc("POST /v1/users/{user_id}/reset", s.handleIssueReset)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", s.authenticate(api))
+
+	// Signing in and finishing a reset are the two things an unauthenticated
+	// caller must be able to do. Both are rate limited by source address.
+	root.HandleFunc("POST /v1/auth/login", s.handleLogin)
+	root.HandleFunc("POST /v1/auth/reset", s.handleCompleteReset)
 
 	// Operational endpoints are unauthenticated: a probe that needs a credential
 	// fails for the wrong reasons during an incident.
@@ -220,6 +262,26 @@ func (s *Server) routes() http.Handler {
 	s.mountDashboard(root)
 
 	return s.recoverPanics(s.withRequestID(root))
+}
+
+// need wraps a handler in the scope it requires.
+func (s *Server) need(scope string, h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := auth.PrincipalFrom(r.Context())
+		if !ok {
+			s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "not authenticated", "")
+			return
+		}
+		if !principal.HasScope(scope) {
+			// 403, not 404: the caller is authenticated and the resource is
+			// theirs. Hiding it would make a permissions problem look like a
+			// missing feature.
+			s.writeError(w, r, http.StatusForbidden, "forbidden",
+				"this caller does not hold "+scope, "")
+			return
+		}
+		h(w, r)
+	})
 }
 
 // recoverPanics keeps one bad request from taking down the process.
@@ -263,9 +325,28 @@ func requestIDFrom(ctx context.Context) string {
 	return id
 }
 
-// authenticate resolves the bearer key to a tenant.
+// authenticate resolves the caller, by session cookie or by API key.
+//
+// Two credentials, one Principal. A person's role becomes the same scopes an
+// API key carries, so every handler downstream asks what the caller may do and
+// never which kind of caller it is.
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The cookie first. A browser that is signed in should not also need a
+		// key, and a stale cookie alongside a valid key should not win.
+		if principal, sess, ok := s.principalFromSession(r); ok {
+			if !s.requireCSRF(w, r) {
+				return
+			}
+			// Best effort: a failed touch costs a slightly stale "last seen",
+			// which is not worth failing a request over.
+			if err := s.accounts.Store().TouchSession(r.Context(), sess.TokenHash, s.now().UTC()); err != nil {
+				s.log.WarnContext(r.Context(), "could not touch session", "error", err.Error())
+			}
+			next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), principal)))
+			return
+		}
+
 		token := auth.BearerToken(r)
 		principal, err := s.auth.Authenticate(r.Context(), token)
 		if err != nil {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/nobledeveloper01/ReconSync/internal/account"
 	"github.com/nobledeveloper01/ReconSync/internal/audit"
 	"github.com/nobledeveloper01/ReconSync/internal/auth"
 	"github.com/nobledeveloper01/ReconSync/internal/correlate"
@@ -290,6 +291,7 @@ func run() error {
 		// key never crosses an origin boundary.
 		Dashboard: webembed.FS(),
 		Auth:      authenticator,
+		Accounts:  account.NewService(db, time.Now),
 		Logger:    log,
 		Ready:     func(ctx context.Context) error { return pool.Ping(ctx) },
 	})

@@ -851,6 +851,100 @@ An unknown scope is refused at creation: `endpoint:write` instead of
 `endpoints:write` would silently deny the key everything it was meant to do, and
 the operator would go looking at the endpoint rather than the typo.
 
+Every `/v1/` route now declares the scope it needs next to its path, so adding a
+route means deciding who may call it. That tightened one previously ungated
+read: `GET /v1/webhooks` requires `reports:read`, which an ingest-only key does
+not hold. Unscoped keys are unaffected.
+
+### `internal/account` — people, as opposed to machines
+
+Deliberately separate from `internal/auth`. An API key is a long-lived secret
+held by a transaction service; a user is a person who signs in, proves a second
+factor, and can be locked out immediately. Giving services passwords or people
+long-lived secrets is how that goes wrong.
+
+**Passwords** use the same argon2id as API keys, and the policy is length only —
+twelve characters, no composition rules. Requiring a symbol and a digit produces
+`Password1!`, memorable to nobody and guessable by everything.
+
+An unknown address, a wrong password and a disabled account all return the same
+error, and the unknown-address path hashes a dummy anyway. Without that, a
+missing account answers in microseconds while a real one spends 64 MiB of
+argon2 — a timing gap wide enough to enumerate every account from a laptop.
+
+**Sessions are server-side**, not JWTs, because the requirement is that
+revocation means *now*. The cookie is an opaque token; only its SHA-256 is
+stored. It is `HttpOnly` (so an injected script cannot read it), `SameSite=Strict`,
+and `Secure` whenever the connection actually arrived over TLS — hard-coding
+`Secure` would stop a development server working at all. Disabling a user,
+changing a password and completing a reset each delete every session that user
+holds.
+
+A second, readable cookie carries a CSRF token that the page echoes in a header.
+`SameSite=Strict` already blocks the cross-site case in every browser that
+honours it; the double submit is the belt to those braces and costs one header.
+
+**Two-factor** is TOTP (RFC 6238), implemented directly against the RFC because
+it is HMAC-SHA1 and a truncation, and the published test vectors make it
+verifiable. Enrolment stores the secret **disabled** until a code proves the
+device works, so a phone with a wrong clock cannot lock someone out of their own
+account during setup. Ten single-use recovery codes are issued at that moment and
+shown once; only their hashes are kept.
+
+The enrolment screen renders a QR code, encoded by hand for the same reason the
+PDF writer is (§7.3). That was worth the effort and worth the care: a QR fails
+*silently*. Three bugs found while writing it — a transposed format block, and a
+Reed-Solomon generator polynomial assembled lowest-degree-first but consumed
+highest-degree-first — each produced a symbol with crisp finder patterns and
+perfect timing that no scanner on earth could read. The tests therefore decode
+the encoder's own output and check the Reed-Solomon syndromes; nothing less
+would have caught any of them. The secret is always printed beside the QR, so a
+camera that will not focus is an inconvenience rather than a dead end.
+
+**Lockout** is five failures, fifteen minutes, and it says so plainly rather than
+pretending the password was wrong — the person is almost always the real owner.
+A wrong second-factor code counts too: six digits is a million guesses, which
+unthrottled is a few minutes of traffic.
+
+Alongside it, failed sign-ins are rate limited per source address, which the
+per-account lockout cannot do — one source spraying one common password across
+many accounts never trips a single account's counter. Only **failures** count
+against that budget. Charging successful sign-ins to it would throttle an office
+of twenty people arriving at nine o'clock behind one egress address, punishing
+the ordinary case to slow an attack made entirely of failures.
+
+**Recovery** never assumes mail. An administrator issues a single-use link that
+expires in an hour and invalidates any earlier one; the token reaches the browser
+in the URL *fragment*, which is never sent to the server and so never lands in an
+access log. When the only administrator is the one locked out, the way back is a
+shell:
+
+```bash
+reconsyncctl users reset-password --email boss@acme.com   # also clears the lockout
+reconsyncctl users disable-2fa --email boss@acme.com --yes # when the phone is gone
+```
+
+That is not a privilege boundary — anyone with a shell already has the database.
+It is the path that still works when the browser path is closed.
+
+**Roles map onto the scopes that already exist** rather than inventing a parallel
+permission system:
+
+| Role | Holds | Can |
+| --- | --- | --- |
+| `viewer` | `reports:read` | read transactions and every report |
+| `operator` | `+ events:write` | also report events, claim reversals, run fire drills |
+| `admin` | `+ endpoints:write` | also change delivery targets and manage users |
+
+Two systems would eventually disagree, and the disagreement would be discovered
+by someone doing something they should not have been able to. One consequence:
+`HasScope` is the only question any handler asks, and it cannot tell whether the
+caller is a person or a service.
+
+An admin cannot demote or disable **themselves**. Not paternalism: the last admin
+doing either leaves a tenant with nobody who can manage users, and the only way
+back is the CLI.
+
 ### `internal/ingest` — the HTTP surface
 
 Handlers, authentication middleware, request IDs, panic recovery, body size
@@ -1219,7 +1313,7 @@ Requires Go 1.23+ and Postgres 16.
 
 ```bash
 createdb reconsync
-for f in migrations/000*.up.sql; do psql -v ON_ERROR_STOP=1 -d reconsync -f "$f"; done
+for f in migrations/0*.up.sql; do psql -v ON_ERROR_STOP=1 -d reconsync -f "$f"; done
 
 export RECONSYNC_DATABASE_URL="postgres://localhost:5432/reconsync?sslmode=disable"
 export RECONSYNC_TENANT_SALT="$(openssl rand -hex 16)"
@@ -1257,6 +1351,19 @@ go run ./cmd/reconsyncctl rules list --tenant tnt_acme
 `doctor` checks database reachability, that every table exists, and **clock
 skew** — skew breaks webhook signature verification with an error message that
 tells the operator nothing, so it is worth surfacing directly.
+
+Create the first person who can sign in to the dashboard. The first account for
+a tenant is made an administrator whatever role you ask for, because otherwise
+nobody could grant the first administrator theirs:
+
+```bash
+go run ./cmd/reconsyncctl users create --tenant tnt_acme --email you@acme.com
+```
+
+Then open `http://localhost:8080`, sign in, and enrol a second factor from the
+Account tab before the deployment sees anything real. `users list` shows who has
+done so; anyone still on a password alone is one phished credential away from
+your reversal configuration.
 
 Report a debit, then its credit:
 
@@ -1360,7 +1467,26 @@ Because payloads come in more than one shape, a receiver should switch on
 | POST | `/v1/webhooks` | Register one. Needs `endpoints:write`. |
 | PATCH | `/v1/webhooks/{id}` | Enable or disable delivery. Needs `endpoints:write`. |
 | DELETE | `/v1/webhooks/{id}` | Remove one, and its delivery history. Needs `endpoints:write`. |
+| POST | `/v1/auth/login` | Email and password; returns `totp_required` when a second factor is on. |
+| POST | `/v1/auth/logout` | End this session server-side. |
+| GET | `/v1/auth/me` | Who the caller is, their role and their scopes. |
+| POST | `/v1/auth/password` | Change it. Ends every session, including this one. |
+| POST | `/v1/auth/totp/begin` | Mint a secret and the QR to scan. Nothing is enabled yet. |
+| POST | `/v1/auth/totp/confirm` | Enable it once a code verifies; returns the recovery codes, once. |
+| POST | `/v1/auth/totp/disable` | Turn it off. Requires the password again. |
+| GET | `/v1/auth/sessions` | Every signed-in browser, with the current one marked. |
+| DELETE | `/v1/auth/sessions` | Sign out everywhere. |
+| POST | `/v1/auth/reset` | Spend a single-use reset token. Unauthenticated. |
+| GET | `/v1/users` | The tenant's users. Admin only. |
+| POST | `/v1/users` | Create one. Admin only. |
+| PATCH | `/v1/users/{id}` | Change role, or disable. Admin only; never yourself. |
+| POST | `/v1/users/{id}/reset` | Issue a single-use reset link. Admin only. |
 | GET | `/healthz` `/readyz` `/metrics` | Liveness, readiness, Prometheus metrics. |
+
+Everything under `/v1/` accepts **either** credential: an `Authorization: Bearer`
+API key, or the session cookie a browser holds. They resolve to the same
+principal. Cookie-authenticated writes additionally need the CSRF token echoed in
+`X-ReconSync-CSRF`.
 
 Ingest is asynchronous, so both event endpoints return `202 Accepted` rather
 than a reconciled result — at the moment the handler replies, the outcome is
@@ -1505,7 +1631,7 @@ resort — reversing a schema also deletes the data in it.
 
 ```text
 cmd/reconsync/       server: ingest API, detection sweep, webhook dispatcher
-cmd/reconsyncctl/    admin CLI: doctor, tenants, keys, endpoints, rules
+cmd/reconsyncctl/    admin CLI: doctor, tenants, keys, endpoints, rules, users
 cmd/reconsync-echo/  reference webhook receiver — the worked example of how to
                      verify a signature before trusting a payload
 scripts/demo.sh      what `make demo` runs
@@ -1515,6 +1641,7 @@ internal/store/      persistence port, in-memory and Postgres implementations
 internal/correlate/  matches credit legs to debits
 internal/pipeline/   bounded worker pool, batching, backpressure
 internal/auth/       API key issue and verification
+internal/account/    users, passwords, sessions, TOTP, recovery, roles
 internal/ingest/     HTTP API, health, readiness, metrics
 internal/audit/      the verifiable hash chain and its signed checkpoints
 internal/evidence/   what a verdict rests on, and how sure we are
@@ -1526,6 +1653,7 @@ internal/webhook/    payload signing, retry policy, SSRF-guarded client
 internal/service/    detection sweep and webhook dispatch loops
 migrations/          schema, embedded in the binary and applied by a ledger
 internal/migrate/    the migration runner: once each, in order, idempotent
+web/                 the dashboard: Vite + TypeScript, no runtime dependencies
 tests/               the whole suite, exercising only the exported API
 ```
 
@@ -1567,4 +1695,9 @@ is delivered to the registered endpoint.
 | Docker Compose quickstart | Done — verified end to end on Docker 29.5 |
 | Rules and endpoints managed via `reconsyncctl` | Done |
 | Endpoint management HTTP API (`/v1/webhooks`) | Done |
-| Dashboard, SDKs | **Not started** |
+| Dashboard — served by the binary, same origin, no CORS | Done |
+| User accounts: argon2id, revocable server-side sessions | Done |
+| Two-factor: TOTP + single-use recovery codes, QR enrolment | Done |
+| Roles and permissions, mapped onto the existing scopes | Done |
+| Password recovery: admin-issued link, and CLI for the locked-out admin | Done |
+| SDKs | **Not started** |

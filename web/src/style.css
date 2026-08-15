@@ -123,7 +123,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 
 .signin { max-width: 380px; margin: 15vh auto; }
 .signin h1 { font-size: 24px; margin-bottom: 4px; }
-.signin form { display: flex; gap: 8px; margin: 16px 0; }
+/* Column, not row: sign-in now has two or three fields, and side-by-side
+   inputs on a phone leave each too narrow to read what was typed. */
+.signin form { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; }
 .signin input {
   flex: 1;
   padding: 9px 12px;
@@ -133,7 +135,16 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
   color: var(--fg);
   font: inherit;
 }
-.signin button, #sign-out {
+.signin select, .card select, .card input {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.signin button, .card button, #sign-out {
   padding: 9px 16px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -142,7 +153,53 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
   cursor: pointer;
   font: inherit;
 }
-.signin button:hover, #sign-out:hover { border-color: var(--accent); }
+.signin button:hover, .card button:hover, #sign-out:hover { border-color: var(--accent); }
+.signin button[disabled] { opacity: 0.6; cursor: default; }
+
+/* Anything that ends an account's access is styled as a consequence, so it is
+   not clicked with the same weight as a filter. */
+button.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+button.danger:hover { border-color: var(--bad); }
+
+/* Who is signed in, kept next to the sign-out button so the answer to "whose
+   session is this" is beside the way to end it. */
+.who { display: flex; align-items: center; gap: 12px; }
+.whoami { color: var(--muted); font-size: 13px; }
+
+.card form { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; max-width: 420px; }
+.card h3 { margin-top: 0; }
+.card + .card { margin-top: 16px; }
+
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.wrap { overflow-wrap: anywhere; }
+
+/* A TOTP secret is typed by hand when a camera is not available, so it is set
+   large and spaced rather than shown as ordinary body text. */
+.secret { font-size: 18px; letter-spacing: 0.08em; overflow-wrap: anywhere; }
+
+.codes {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  line-height: 1.9;
+  margin: 12px 0;
+}
+
+/* Fixed width and a white plate regardless of theme: a QR rendered dark-on-dark
+   is not a QR. */
+.qr { width: 200px; margin: 12px 0; padding: 8px; background: #fff; border-radius: 6px; }
+.qr svg { display: block; width: 100%; height: auto; }
+
+.sub { color: var(--muted); margin: 0 0 16px; }
+tr.muted td { opacity: 0.55; }
+tr.current td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+td em { color: var(--muted); font-style: normal; font-size: 12px; }
+.warn { color: var(--warn); }
+td.actions { white-space: nowrap; }
+td.actions button { font-size: 12px; padding: 3px 9px; margin-right: 6px; }
 
 /* Narrow screens: the header stacks rather than letting the nav wrap into a
    column beside the logo, which is what it did at 390px. */
@@ -156,7 +213,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
     padding: 14px 0;
   }
   header h1 { grid-row: 1; }
-  #sign-out { grid-row: 1; grid-column: 2; }
+  .who { grid-row: 1; grid-column: 2; }
+  .whoami { display: none; }
   header nav {
     grid-row: 2;
     grid-column: 1 / -1;

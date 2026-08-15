@@ -120,9 +120,25 @@ func TestWebhookAPIRequiresAnAdminScope(t *testing.T) {
 		t.Errorf("message = %q, want it to name the missing scope", msg)
 	}
 
-	// It can still read, which is what its own dashboards need.
-	if w := f.do(t, http.MethodGet, "/v1/webhooks", key.Secret, nil); w.Code != http.StatusOK {
-		t.Errorf("list with an ingest key = %d, want 200", w.Code)
+	// Nor read the list. Every route now declares the scope it needs, and
+	// reading where reversals are delivered is reading, so it takes
+	// reports:read — which an ingest key deliberately does not hold. This used
+	// to be ungated, back when webhook writes were the only scoped route.
+	if w := f.do(t, http.MethodGet, "/v1/webhooks", key.Secret, nil); w.Code != http.StatusForbidden {
+		t.Errorf("list with an ingest key = %d, want 403", w.Code)
+	}
+
+	// A key that can read reports can read the list.
+	reader, err := auth.Generate(auth.EnvTest)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := f.store.CreateAPIKey(ctx, tenantA, "key_reader", reader,
+		[]string{auth.ScopeReportsRead}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	if w := f.do(t, http.MethodGet, "/v1/webhooks", reader.Secret, nil); w.Code != http.StatusOK {
+		t.Errorf("list with a reporting key = %d, want 200", w.Code)
 	}
 
 	// A key holding the scope may write.

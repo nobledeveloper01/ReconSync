@@ -44,6 +44,13 @@ Usage:
   reconsyncctl licence keygen                  mint the licence signing key (vendor)
   reconsyncctl licence issue --customer NAME --months N   (vendor)
   reconsyncctl licence show                    what the configured licence says
+  reconsyncctl users create --tenant ID --email E [--role viewer|operator|admin]
+  reconsyncctl users list --tenant ID
+  reconsyncctl users role --email E --role viewer|operator|admin
+  reconsyncctl users reset-password --email E    the way back in for a locked-out admin
+  reconsyncctl users disable-2fa --email E --yes when the authenticator is lost
+  reconsyncctl users disable --email E           end every session, refuse sign-in
+  reconsyncctl users enable --email E
   reconsyncctl checkpoints keygen              mint an audit signing key
   reconsyncctl checkpoints list --tenant ID    signed chain heads, as JSON to archive
   reconsyncctl checkpoints verify --tenant ID [--public-key KEY]
@@ -110,6 +117,17 @@ func run(args []string) error {
 			"keygen": licenceKeygen,
 			"issue":  licenceIssue,
 			"show":   licenceShow,
+		})
+
+	case "users":
+		return dispatch(ctx, "users", args[1:], map[string]subcommand{
+			"create":         usersCreate,
+			"list":           usersList,
+			"reset-password": usersResetPassword,
+			"disable-2fa":    usersDisable2FA,
+			"disable":        usersDisable,
+			"enable":         usersEnable,
+			"role":           usersRole,
 		})
 
 	case "checkpoints":

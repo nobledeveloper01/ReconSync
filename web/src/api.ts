@@ -3,8 +3,8 @@
 // The dashboard is served by the ReconSync binary itself, from the same origin,
 // so every request here is a relative path. That is deliberate: a dashboard on
 // another origin would need CORS opened on an API that advises money movement,
-// and would put the key through a cross-origin request. Same origin means
-// neither.
+// and would put the credential through a cross-origin request. Same origin
+// means neither.
 
 export class ApiError extends Error {
   status: number;
@@ -17,7 +17,14 @@ export class ApiError extends Error {
   }
 }
 
-/** Where the key lives while the tab is open. */
+/**
+ * Where an API key lives while the tab is open.
+ *
+ * A signed-in person does not use this at all — their session is an HttpOnly
+ * cookie this code cannot read, which is the point. The key path remains for a
+ * deployment that has no user accounts, and for reading a tenant with a
+ * service credential.
+ */
 const KEY_STORAGE = "reconsync.key";
 
 export function storedKey(): string | null {
@@ -35,12 +42,33 @@ export function clearKey(): void {
   sessionStorage.removeItem(KEY_STORAGE);
 }
 
-async function request<T>(path: string): Promise<T> {
-  const key = storedKey();
-  if (!key) throw new ApiError(401, "unauthenticated", "no API key");
+/** Reads the CSRF cookie the server set alongside the session. */
+function csrfToken(): string {
+  const match = document.cookie.match(/(?:^|;\s*)reconsync_csrf=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
 
+function headers(withBody: boolean): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (withBody) out["Content-Type"] = "application/json";
+
+  const csrf = csrfToken();
+  if (csrf) out["X-ReconSync-CSRF"] = csrf;
+
+  // Only when there is no session. A stale key alongside a live session would
+  // otherwise be ambiguous, and the server prefers the cookie anyway.
+  const key = storedKey();
+  if (key && !csrf) out["Authorization"] = `Bearer ${key}`;
+  return out;
+}
+
+async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
-    headers: { Authorization: `Bearer ${key}` },
+    method,
+    headers: headers(body !== undefined),
+    // The session cookie rides along; without this fetch would omit it.
+    credentials: "same-origin",
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -49,17 +77,22 @@ async function request<T>(path: string): Promise<T> {
     let code = "error";
     let message = `${res.status} ${res.statusText}`;
     try {
-      const body = await res.json();
-      if (body?.error) {
-        code = body.error.code ?? code;
-        message = body.error.message ?? message;
+      const parsed = await res.json();
+      if (parsed?.error) {
+        code = parsed.error.code ?? code;
+        message = parsed.error.message ?? message;
       }
     } catch {
       /* not JSON */
     }
     throw new ApiError(res.status, code, message);
   }
+  if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+function request<T>(path: string): Promise<T> {
+  return call<T>("GET", path);
 }
 
 // --- shapes, mirroring the Go types the API actually returns ---
@@ -180,6 +213,76 @@ export interface Endpoint {
   events: string[];
   enabled: boolean;
 }
+
+export interface Session {
+  email: string;
+  role: string;
+  tenant_id: string;
+  scopes: string[];
+  totp_enabled: boolean;
+  csrf_token: string;
+}
+
+export interface UserRow {
+  id: string;
+  email: string;
+  role: string;
+  totp_enabled: boolean;
+  disabled: boolean;
+  last_login_at?: string;
+  created_at: string;
+}
+
+export interface BrowserSession {
+  user_agent: string;
+  ip: string;
+  created_at: string;
+  last_seen_at: string;
+  current: boolean;
+}
+
+/** True when the signed-in role holds a scope. Mirrors the server exactly. */
+export function can(session: Session | null, scope: string): boolean {
+  if (!session) return false;
+  // An empty list means an unscoped API key, which has full access.
+  return session.scopes.length === 0 || session.scopes.includes(scope);
+}
+
+export const auth = {
+  login: (email: string, password: string, code?: string) =>
+    call<Session | { totp_required: true; user_id: string }>("POST", "/v1/auth/login", {
+      email,
+      password,
+      ...(code ? { code } : {}),
+    }),
+  me: () => request<Session>("/v1/auth/me"),
+  logout: () => call<unknown>("POST", "/v1/auth/logout", {}),
+  changePassword: (current_password: string, new_password: string) =>
+    call<unknown>("POST", "/v1/auth/password", { current_password, new_password }),
+  beginTOTP: () =>
+    call<{ secret: string; uri: string; qr: string; notice: string }>("POST", "/v1/auth/totp/begin", {}),
+  confirmTOTP: (code: string) =>
+    call<{ recovery_codes: string[]; notice: string }>("POST", "/v1/auth/totp/confirm", { code }),
+  disableTOTP: (password: string) => call<unknown>("POST", "/v1/auth/totp/disable", { password }),
+  sessions: () => request<{ sessions: BrowserSession[] }>("/v1/auth/sessions"),
+  revokeSessions: () => call<unknown>("DELETE", "/v1/auth/sessions"),
+  completeReset: (token: string, password: string) =>
+    call<unknown>("POST", "/v1/auth/reset", { token, password }),
+};
+
+export const users = {
+  list: () => request<{ users: UserRow[] }>("/v1/users"),
+  create: (email: string, password: string, role: string) =>
+    call<UserRow>("POST", "/v1/users", { email, password, role }),
+  update: (id: string, patch: { role?: string; disabled?: boolean }) =>
+    call<unknown>("PATCH", `/v1/users/${encodeURIComponent(id)}`, patch),
+  issueReset: (id: string) =>
+    call<{ reset_token: string; expires_at: string; notice: string }>(
+      "POST",
+      `/v1/users/${encodeURIComponent(id)}/reset`,
+      {},
+    ),
+};
 
 export const api = {
   transactions: (status: string, limit = 100) =>
