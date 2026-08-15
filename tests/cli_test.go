@@ -215,14 +215,19 @@ func TestCLIEndpointsRequiresArguments(t *testing.T) {
 
 // Signing a test payload needs the same secret the server signs with; say so
 // rather than sending an unverifiable payload.
-func TestCLIEndpointsTestRequiresSigningSecret(t *testing.T) {
+// "endpoints test" now resolves the endpoint's own secret reference, so it has
+// to read the endpoint before it can know which secret to look for. Without a
+// database it therefore reports the database, and the secret is named later by
+// the resolver — which can say exactly which variable is missing rather than
+// assuming everyone uses the global one.
+func TestCLIEndpointsTestNeedsADatabaseBeforeItCanResolveASecret(t *testing.T) {
 	_, stderr, code := runCtl(t, "endpoints", "test", "--tenant", "tnt_x", "--id", "we_1")
 
 	if code == 0 {
-		t.Fatal("exited 0 with no signing secret configured")
+		t.Fatal("exited 0 with nothing configured")
 	}
-	if !strings.Contains(stderr, "RECONSYNC_WEBHOOK_SECRET") {
-		t.Errorf("stderr = %q, want it to name the missing secret", stderr)
+	if !strings.Contains(stderr, "RECONSYNC_DATABASE_URL") {
+		t.Errorf("stderr = %q, want it to name the missing variable", stderr)
 	}
 }
 

@@ -53,7 +53,7 @@ func newDrillFixture(t *testing.T, handler http.HandlerFunc) *drillFixture {
 		Sender: webhook.NewSender(webhook.SenderOptions{
 			Client: webhook.NewClient(webhook.TransportOptions{AllowPrivateAddresses: true}),
 		}),
-		Secrets: func(context.Context, string) (string, error) { return "whsec_test", nil },
+		Secrets: func(context.Context, string) ([]string, error) { return []string{"whsec_test"}, nil },
 	})
 	if err != nil {
 		t.Fatalf("drill.New: %v", err)
@@ -244,7 +244,7 @@ func TestDrillWithNoEndpointIsAFinding(t *testing.T) {
 	runner, err := drill.New(drill.Options{
 		Store:   s,
 		Sender:  webhook.NewSender(webhook.SenderOptions{}),
-		Secrets: func(context.Context, string) (string, error) { return "whsec_test", nil },
+		Secrets: func(context.Context, string) ([]string, error) { return []string{"whsec_test"}, nil },
 	})
 	if err != nil {
 		t.Fatalf("drill.New: %v", err)
@@ -351,7 +351,7 @@ func TestDrillFansOutAcrossEndpoints(t *testing.T) {
 		Sender: webhook.NewSender(webhook.SenderOptions{
 			Client: webhook.NewClient(webhook.TransportOptions{AllowPrivateAddresses: true}),
 		}),
-		Secrets: func(context.Context, string) (string, error) { return "whsec_test", nil },
+		Secrets: func(context.Context, string) ([]string, error) { return []string{"whsec_test"}, nil },
 	})
 	if err != nil {
 		t.Fatalf("drill.New: %v", err)

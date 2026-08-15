@@ -37,6 +37,23 @@ func (p *Postgres) SetEndpointEnabled(ctx context.Context, tenantID, id string, 
 	return nil
 }
 
+// SetEndpointSecretRef points an endpoint at a different signing secret.
+//
+// A reference, never a secret: the row can still be dumped, reviewed and backed
+// up without carrying a signing key.
+func (p *Postgres) SetEndpointSecretRef(ctx context.Context, tenantID, id, ref string) error {
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE webhook_endpoints SET secret_ref = $3 WHERE tenant_id = $1 AND id = $2`,
+		tenantID, id, ref)
+	if err != nil {
+		return fmt.Errorf("set endpoint secret ref: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (p *Postgres) DeleteEndpoint(ctx context.Context, tenantID, id string) error {
 	tag, err := p.pool.Exec(ctx,
 		`DELETE FROM webhook_endpoints WHERE tenant_id = $1 AND id = $2`, tenantID, id)

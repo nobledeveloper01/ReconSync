@@ -72,6 +72,26 @@ see and therefore can never detect the failure of, and a hole in the record look
 exactly like a quiet day unless something says otherwise. That is the same blind
 spot the server models as an ingest gap, arriving from your side instead.
 
+## Rotating the signing secret
+
+While ReconSync rotates, the header carries a `v1=` per secret and every SDK
+verifies against all of them — so a receiver holding either the old secret or the
+new one keeps working, and you can redeploy whenever suits you.
+
+If you would rather move first, every `verify` also takes a list:
+
+```ts
+verifySignature([process.env.OLD_SECRET!, process.env.NEW_SECRET!], header, rawBody);
+```
+
+```python
+verify_signature([old_secret, new_secret], header, raw_body)
+```
+
+```go
+reconsync.VerifyAny([]string{oldSecret, newSecret}, header, rawBody, time.Now(), reconsync.DefaultTolerance)
+```
+
 ## What the payload is telling you
 
 - `advisory` is always `true`. Check your own ledger before moving money. A

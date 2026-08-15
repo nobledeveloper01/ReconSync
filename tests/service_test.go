@@ -17,7 +17,7 @@ import (
 
 const testSecret = "whsec_service_test"
 
-func testSecrets(context.Context, string) (string, error) { return testSecret, nil }
+func testSecrets(context.Context, string) ([]string, error) { return []string{testSecret}, nil }
 
 // localSender reaches loopback, which the production guard refuses.
 func localSender() *webhook.Sender {

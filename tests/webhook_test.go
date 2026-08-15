@@ -307,7 +307,7 @@ func testDelivery(url string, attempt int) webhook.Delivery {
 		EndpointID:    "we_1",
 		TransactionID: "TX1",
 		URL:           url,
-		Secret:        "whsec_test",
+		Secrets:       []string{"whsec_test"},
 		Event:         webhook.EventReversalTriggered,
 		Payload:       []byte(`{"event":"reversal.triggered"}`),
 		Attempt:       attempt,

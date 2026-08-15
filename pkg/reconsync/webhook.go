@@ -54,8 +54,24 @@ var (
 // the body alone is what stops a captured request being replayed with a fresh
 // timestamp, and it is a design receivers already understand.
 func Sign(secret string, at time.Time, body []byte) string {
+	return SignWith([]string{secret}, at, body)
+}
+
+// SignWith signs with several secrets at once, emitting one v1 per secret.
+//
+// This is what makes rotation possible without a coordinated cutover. During
+// the window the payload carries a signature for the old secret and the new
+// one, so a receiver holding either verifies it, and the two systems can be
+// changed on different days by different people.
+func SignWith(secrets []string, at time.Time, body []byte) string {
 	ts := at.Unix()
-	return fmt.Sprintf("t=%d,v1=%s", ts, computeSignature(secret, ts, body))
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "t=%d", ts)
+	for _, secret := range secrets {
+		fmt.Fprintf(&b, ",v1=%s", computeSignature(secret, ts, body))
+	}
+	return b.String()
 }
 
 func computeSignature(secret string, ts int64, body []byte) string {
@@ -71,6 +87,15 @@ func computeSignature(secret string, ts int64, body []byte) string {
 // Shipped because every SDK needs it and a receiver rolling their own is where
 // timing leaks and missing replay checks come from.
 func Verify(secret, header string, body []byte, now time.Time, tolerance time.Duration) error {
+	return VerifyAny([]string{secret}, header, body, now, tolerance)
+}
+
+// VerifyAny checks the header against several candidate secrets.
+//
+// The other half of rotation. A sender that has already moved to a new secret
+// and a receiver that has not yet been redeployed both keep working while
+// either side holds both values.
+func VerifyAny(secrets []string, header string, body []byte, now time.Time, tolerance time.Duration) error {
 	ts, provided, err := parseSignature(header)
 	if err != nil {
 		return err
@@ -86,38 +111,57 @@ func Verify(secret, header string, body []byte, now time.Time, tolerance time.Du
 		}
 	}
 
-	want := computeSignature(secret, ts, body)
-	// Compared as raw bytes in constant time; a byte-by-byte compare would leak
-	// how much of the signature was correct.
-	if !hmac.Equal([]byte(want), []byte(provided)) {
+	// Every combination is compared even after one matches. Returning early
+	// would make the time taken depend on which secret and which signature
+	// matched, and the point of a constant-time compare is that it does not.
+	matched := false
+	for _, secret := range secrets {
+		want := []byte(computeSignature(secret, ts, body))
+		for _, candidate := range provided {
+			// Compared as raw bytes in constant time; a byte-by-byte compare
+			// would leak how much of the signature was correct.
+			if hmac.Equal(want, []byte(candidate)) {
+				matched = true
+			}
+		}
+	}
+
+	if !matched {
 		return ErrSignatureMismatch
 	}
 	return nil
 }
 
-func parseSignature(header string) (ts int64, signature string, err error) {
+// parseSignature reads the timestamp and every signature the header carries.
+//
+// Several v1 entries is the normal state during a rotation, so they are all
+// collected. Keeping only the last — which is what a single-value parse does —
+// would make the sender's ordering decide whether the receiver worked.
+func parseSignature(header string) (ts int64, signatures []string, err error) {
 	if header == "" {
-		return 0, "", ErrMalformedSignature
+		return 0, nil, ErrMalformedSignature
 	}
 
 	for _, part := range strings.Split(header, ",") {
 		key, value, found := strings.Cut(strings.TrimSpace(part), "=")
 		if !found {
-			return 0, "", ErrMalformedSignature
+			return 0, nil, ErrMalformedSignature
 		}
 		switch key {
 		case "t":
 			ts, err = strconv.ParseInt(value, 10, 64)
 			if err != nil {
-				return 0, "", ErrMalformedSignature
+				return 0, nil, ErrMalformedSignature
 			}
 		case "v1":
-			signature = value
+			if value != "" {
+				signatures = append(signatures, value)
+			}
 		}
 	}
 
-	if ts == 0 || signature == "" {
-		return 0, "", ErrMalformedSignature
+	if ts == 0 || len(signatures) == 0 {
+		return 0, nil, ErrMalformedSignature
 	}
-	return ts, signature, nil
+	return ts, signatures, nil
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nobledeveloper01/ReconSync/internal/secret"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
 	"github.com/nobledeveloper01/ReconSync/internal/webhook"
 )
@@ -155,11 +156,6 @@ func endpointsTest(ctx context.Context, args []string) error {
 		return errors.New("--id is required")
 	}
 
-	secret := os.Getenv("RECONSYNC_WEBHOOK_SECRET")
-	if secret == "" {
-		return errors.New("RECONSYNC_WEBHOOK_SECRET is required to sign the test payload")
-	}
-
 	pool, err := connect(ctx)
 	if err != nil {
 		return err
@@ -196,6 +192,15 @@ func endpointsTest(ctx context.Context, args []string) error {
 		return err
 	}
 
+	// Resolved from the endpoint's own reference, not from the global variable.
+	// Signing the test with a different secret to the one real deliveries use
+	// would make this command pass for an endpoint that is about to reject
+	// every reversal — which is the opposite of what it is for.
+	secrets, err := secret.New(os.Getenv("RECONSYNC_WEBHOOK_SECRET")).Resolve(ctx, target.SecretRef)
+	if err != nil {
+		return fmt.Errorf("%w\n  The signing secret must be resolvable from this host, exactly as the server resolves it", err)
+	}
+
 	sender := webhook.NewSender(webhook.SenderOptions{
 		Client: webhook.NewClient(webhook.TransportOptions{AllowPrivateAddresses: *allowPrivate}),
 	})
@@ -204,7 +209,7 @@ func endpointsTest(ctx context.Context, args []string) error {
 		EndpointID:    target.ID,
 		TransactionID: "TEST-PING",
 		URL:           target.URL,
-		Secret:        secret,
+		Secrets:       secrets,
 		Event:         webhook.EventType("endpoint.test"),
 		Payload:       payload,
 	})
@@ -236,4 +241,92 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// endpointsRotate points an endpoint at a new signing secret.
+//
+// Rotation is two commands, not one, because the safe order matters. Starting
+// it signs every payload with the new secret and the old one at once, so a
+// receiver holding either keeps working and neither side has to change at the
+// same moment. Finishing it drops the old.
+func endpointsRotate(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("endpoints rotate", flag.ContinueOnError)
+	tenant := fs.String("tenant", "", "tenant id")
+	id := fs.String("id", "", "endpoint id")
+	to := fs.String("to", "", "reference to the new secret, e.g. env://ACME_WEBHOOK_SECRET_2026")
+	finish := fs.Bool("finish", false, "drop the old secret, leaving only --to")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	switch {
+	case *tenant == "":
+		return errors.New("--tenant is required")
+	case *id == "":
+		return errors.New("--id is required")
+	case *to == "":
+		return errors.New("--to is required, e.g. --to env://ACME_WEBHOOK_SECRET_2026")
+	}
+
+	pool, err := connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	db := store.NewPostgres(pool)
+	eps, err := db.ListEndpoints(ctx, *tenant)
+	if err != nil {
+		return err
+	}
+
+	var target *store.WebhookEndpoint
+	for _, ep := range eps {
+		if ep.ID == *id {
+			target = ep
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("no endpoint %q for tenant %q — run: reconsyncctl endpoints list --tenant %s",
+			*id, *tenant, *tenant)
+	}
+
+	ref := *to
+	if !*finish {
+		// The old reference is kept alongside the new one. Every payload then
+		// carries a signature for each, which is what lets the receiver change
+		// over on a different day to the sender.
+		previous := target.SecretRef
+		if previous == "" {
+			previous = store.DefaultSecretRef
+		}
+		if previous != *to {
+			ref = *to + "," + previous
+		}
+	}
+
+	// Resolved before it is stored. An unresolvable reference written to the
+	// database would stop every delivery to this endpoint, and the operator
+	// would find out from a dead-letter queue rather than from this command.
+	resolver := secret.New(os.Getenv("RECONSYNC_WEBHOOK_SECRET"))
+	if _, err := resolver.Resolve(ctx, ref); err != nil {
+		return fmt.Errorf("%w\n  Set it on this host and on the server before rotating", err)
+	}
+
+	if err := db.SetEndpointSecretRef(ctx, *tenant, *id, ref); err != nil {
+		return err
+	}
+
+	if *finish {
+		fmt.Printf("%s now signs with %s only.\n", *id, *to)
+		fmt.Println("\nThe old secret no longer verifies. Remove it from the receiver.")
+		return nil
+	}
+
+	fmt.Printf("%s now signs with both:\n  new  %s\n  old  %s\n", *id, *to, target.SecretRef)
+	fmt.Println("\nEvery payload now carries a signature for each, so the receiver keeps")
+	fmt.Println("working whether it holds the old secret or the new one.")
+	fmt.Printf("\nOnce the receiver has the new secret, finish:\n"+
+		"  reconsyncctl endpoints rotate --tenant %s --id %s --to %s --finish\n", *tenant, *id, *to)
+	return nil
 }

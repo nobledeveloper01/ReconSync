@@ -22,10 +22,15 @@ type Delivery struct {
 	EndpointID    string
 	TransactionID string
 	URL           string
-	Secret        string
-	Event         EventType
-	Payload       []byte
-	Attempt       int
+
+	// Secrets are what the payload is signed with, the first being the one a
+	// receiver on a single secret is expected to hold. More than one appears
+	// during a rotation, so both sides keep working while either changes.
+	Secrets []string
+
+	Event   EventType
+	Payload []byte
+	Attempt int
 
 	// Drill sets the drill header. Only a fire drill sets it, and the queue
 	// never carries one, so a real reversal cannot acquire it by accident.
@@ -86,7 +91,7 @@ func (s *Sender) Send(ctx context.Context, d Delivery) Result {
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", s.userAgent)
-	req.Header.Set(SignatureHeader, Sign(d.Secret, started, d.Payload))
+	req.Header.Set(SignatureHeader, SignWith(d.Secrets, started, d.Payload))
 	req.Header.Set(EventHeader, string(d.Event))
 	if d.Drill {
 		// A drill has no queue row, so it borrows its own transaction id rather

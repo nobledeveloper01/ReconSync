@@ -92,3 +92,43 @@ test("parseWebhook verifies before it parses", () => {
   // A bad signature must not yield a parsed object a handler could act on.
   assert.throws(() => parseWebhook(f.secret, "t=1,v1=deadbeef", f.body, { nowSeconds: f.timestamp }));
 });
+
+// Rotation, from the receiving side. A payload signed with two secrets must
+// verify with either one alone, or rotating breaks every receiver that has not
+// been redeployed yet — which is the whole thing rotation is meant to avoid.
+test("a rotated payload verifies with either secret", () => {
+  const f = fixtures.find((f) => f.name === "rotating");
+  assert.ok(f, "the rotation fixture is missing");
+  assert.equal((f.header.match(/v1=/g) ?? []).length, 2, "the fixture carries one signature");
+
+  for (const secret of f.verify_with) {
+    verifySignature(secret, f.header, f.body, { nowSeconds: f.timestamp });
+  }
+
+  // Only those two. A second signature must not become a second way in.
+  for (const secret of f.reject_with) {
+    assert.throws(
+      () => verifySignature(secret, f.header, f.body, { nowSeconds: f.timestamp }),
+      SignatureError,
+      `${secret} verified a payload it did not sign`,
+    );
+  }
+});
+
+// And from the sending side: a receiver holding both while the sender is still
+// on one. The two halves let each side change on its own schedule.
+test("holding several secrets verifies a single-secret signature", () => {
+  const f = fixtures.find((f) => f.name === "reversal");
+
+  verifySignature(["whsec_something_old", f.secret], f.header, f.body, {
+    nowSeconds: f.timestamp,
+  });
+
+  assert.throws(
+    () =>
+      verifySignature(["whsec_something_old", "whsec_also_wrong"], f.header, f.body, {
+        nowSeconds: f.timestamp,
+      }),
+    SignatureError,
+  );
+});

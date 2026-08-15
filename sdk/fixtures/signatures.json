@@ -40,6 +40,23 @@
     "valid": true
   },
   {
+    "name": "rotating",
+    "secret": "whsec_rotated_new",
+    "timestamp": 1767225600,
+    "body": "{\"event\":\"reversal.triggered\",\"occurred_at\":\"2026-01-01T00:00:00Z\",\"data\":{\"transaction_id\":\"TX-1\",\"amount_minor\":5000000,\"currency\":\"NGN\",\"advisory\":true,\"confidence\":0.9,\"debit_at\":\"2026-01-01T00:00:00Z\",\"window_seconds\":300,\"regulatory_deadline\":\"2026-01-02T00:00:00Z\"}}",
+    "header": "t=1767225600,v1=8744b560d29389680b18b17396796916fe470ab2f4e4fa29af74061e37495df5,v1=b2cb9935a0b6673b0d0a5e64a205b82e87934cf49bb3fb42f2262691ba9a57bd",
+    "valid": true,
+    "why": "signed with both secrets during a rotation",
+    "verify_with": [
+      "whsec_rotated_new",
+      "whsec_rotated_old"
+    ],
+    "reject_with": [
+      "whsec_never_used",
+      "whsec_fixture_not_a_real_secret"
+    ]
+  },
+  {
     "name": "tampered-body",
     "secret": "whsec_fixture_not_a_real_secret",
     "timestamp": 1767225600,

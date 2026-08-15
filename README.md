@@ -1190,6 +1190,43 @@ server models as an ingest gap (B1), arriving from the customer's side instead.
 could not drain, because a queue silently lost at every rolling restart is a gap
 in the record nobody would ever notice.
 
+### `internal/secret` — one secret per endpoint, and rotating it
+
+An endpoint row stores a **reference**, never a secret: `env://ACME_WEBHOOK_SECRET`
+names where to find one. A reference can be dumped, reviewed, backed up and
+pasted into a support ticket; a secret cannot.
+
+That reference had been stored, carried through the delivery join and passed to
+a resolver since endpoints existed — and the resolver ignored it and returned one
+global secret for everything. Every tenant on a deployment signed with the same
+key, and `reconsyncctl endpoints test` signed with the global one regardless of
+what the endpoint actually used, so the connectivity test could pass for an
+endpoint about to reject every reversal. Both are now resolved from the row.
+
+An unknown scheme is **refused**, not treated as a literal secret. Accepting one
+would mean a pasted secret or a typo becomes the signing key, and every delivery
+would go out signed with a value the receiver has never seen — while looking like
+it worked. A missing variable is named, so an operator who has just added an
+endpoint is told which one to set.
+
+**Rotation is two commands, because the safe order matters:**
+
+```bash
+reconsyncctl endpoints rotate --tenant acme --id we_… --to env://ACME_SECRET_2026
+# every payload now carries a signature for the new secret and the old one
+reconsyncctl endpoints rotate --tenant acme --id we_… --to env://ACME_SECRET_2026 --finish
+```
+
+Between those two commands the payload carries a `v1=` per secret, so a receiver
+holding either verifies it. That is what removes the coordinated cutover: the
+customer updates their receiver whenever they like, and nobody has to change two
+systems in the same minute. All three SDKs accept a list of secrets as well, for
+a receiver that would rather rotate from its own side first.
+
+Both halves are needed. A receiver that keeps only the *last* `v1` — which is
+what a single-value parse does — would have the sender's ordering decide whether
+it worked, so every SDK collects them all.
+
 ### `internal/webhook` — signing, retries, and not getting used as an SSRF pivot
 
 Signatures are HMAC-SHA256 over `{timestamp}.{body}`, sent as
@@ -1685,6 +1722,7 @@ cmd/reconsync-echo/  reference webhook receiver — the worked example of how to
 scripts/demo.sh      what `make demo` runs
 internal/domain/     transaction types + state machine (no infrastructure deps)
 internal/rules/      reconciliation window resolution
+internal/secret/     resolves an endpoint's signing secret from its reference
 internal/store/      persistence port, in-memory and Postgres implementations
 internal/correlate/  matches credit legs to debits
 internal/pipeline/   bounded worker pool, batching, backpressure
@@ -1753,3 +1791,4 @@ is delivered to the registered endpoint.
 | Roles and permissions, mapped onto the existing scopes | Done |
 | Password recovery: admin-issued link, and CLI for the locked-out admin | Done |
 | Client libraries: Go, Node, Python | Done — one signature, three implementations, cross-checked |
+| Per-endpoint signing secrets, and rotation without a cutover | Done |

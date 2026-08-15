@@ -30,6 +30,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
 	"github.com/nobledeveloper01/ReconSync/internal/provider"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
+	"github.com/nobledeveloper01/ReconSync/internal/secret"
 	"github.com/nobledeveloper01/ReconSync/internal/service"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
 	"github.com/nobledeveloper01/ReconSync/internal/webhook"
@@ -264,7 +265,12 @@ func run() error {
 	// The drill and the dispatcher share one sender and one secret resolver, so
 	// a drill travels exactly the path a real reversal does. Testing a different
 	// path would prove nothing about the real one.
-	secrets := func(context.Context, string) (string, error) { return cfg.webhookSecret, nil }
+	// Each endpoint's own reference, resolved at delivery time. The reference
+	// has been stored, carried through the delivery join and passed here since
+	// endpoints existed; until now this function ignored it and handed back one
+	// global secret, so every tenant on a deployment signed with the same key
+	// and rotating one meant rotating all of them at once.
+	secrets := secret.New(cfg.webhookSecret).Resolve
 	sender := webhook.NewSender(webhook.SenderOptions{
 		Client: webhook.NewClient(webhook.TransportOptions{
 			AllowPrivateAddresses: cfg.allowPrivateWebhookTargets,

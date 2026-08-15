@@ -31,6 +31,16 @@ func Sign(secret string, at time.Time, body []byte) string {
 	return reconsync.Sign(secret, at, body)
 }
 
+// SignWith signs with several secrets, emitting one v1 per secret.
+func SignWith(secrets []string, at time.Time, body []byte) string {
+	return reconsync.SignWith(secrets, at, body)
+}
+
+// VerifyAny checks the header against several candidate secrets.
+func VerifyAny(secrets []string, header string, body []byte, now time.Time, tolerance time.Duration) error {
+	return reconsync.VerifyAny(secrets, header, body, now, tolerance)
+}
+
 // Verify checks a signature header against a payload.
 func Verify(secret, header string, body []byte, now time.Time, tolerance time.Duration) error {
 	return reconsync.Verify(secret, header, body, now, tolerance)

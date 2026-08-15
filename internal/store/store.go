@@ -233,6 +233,10 @@ type WebhookStore interface {
 	// where survives the decision to stop sending.
 	SetEndpointEnabled(ctx context.Context, tenantID, id string, enabled bool) error
 
+	// SetEndpointSecretRef points an endpoint at a different signing secret,
+	// which is how a rotation is carried out.
+	SetEndpointSecretRef(ctx context.Context, tenantID, id, ref string) error
+
 	// DeleteEndpoint removes an endpoint and, by cascade, its delivery history.
 	DeleteEndpoint(ctx context.Context, tenantID, id string) error
 

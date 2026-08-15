@@ -284,13 +284,15 @@ func TestTheCrossLanguageFixturesStillMatchTheSigner(t *testing.T) {
 	}
 
 	var fixtures []struct {
-		Name      string `json:"name"`
-		Secret    string `json:"secret"`
-		Timestamp int64  `json:"timestamp"`
-		Body      string `json:"body"`
-		Header    string `json:"header"`
-		Valid     bool   `json:"valid"`
-		Why       string `json:"why"`
+		Name       string   `json:"name"`
+		Secret     string   `json:"secret"`
+		Timestamp  int64    `json:"timestamp"`
+		Body       string   `json:"body"`
+		Header     string   `json:"header"`
+		Valid      bool     `json:"valid"`
+		Why        string   `json:"why"`
+		VerifyWith []string `json:"verify_with"`
+		RejectWith []string `json:"reject_with"`
 	}
 	if err := json.Unmarshal(raw, &fixtures); err != nil {
 		t.Fatalf("parse fixtures: %v", err)
@@ -310,8 +312,22 @@ func TestTheCrossLanguageFixturesStillMatchTheSigner(t *testing.T) {
 			t.Errorf("%s: the Go signer accepts a fixture marked invalid (%s)", f.Name, f.Why)
 		}
 
-		if f.Valid && reconsync.Sign(f.Secret, at, []byte(f.Body)) != f.Header {
+		// Rotation fixtures carry a signature per secret, so they are not what
+		// single-secret Sign produces; they are checked by what must verify
+		// them instead.
+		if f.Valid && len(f.VerifyWith) == 0 && reconsync.Sign(f.Secret, at, []byte(f.Body)) != f.Header {
 			t.Errorf("%s: the fixture header is not what Sign produces today", f.Name)
+		}
+
+		for _, s := range f.VerifyWith {
+			if err := reconsync.Verify(s, f.Header, []byte(f.Body), at, reconsync.DefaultTolerance); err != nil {
+				t.Errorf("%s: a secret that signed it does not verify: %v", f.Name, err)
+			}
+		}
+		for _, s := range f.RejectWith {
+			if err := reconsync.Verify(s, f.Header, []byte(f.Body), at, reconsync.DefaultTolerance); err == nil {
+				t.Errorf("%s: a secret that did not sign it verified", f.Name)
+			}
 		}
 	}
 }

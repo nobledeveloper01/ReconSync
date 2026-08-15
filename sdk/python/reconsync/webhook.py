@@ -14,6 +14,7 @@ import json
 import time
 from dataclasses import dataclass
 from hashlib import sha256
+from collections.abc import Sequence
 from typing import Any, Literal
 
 SIGNATURE_HEADER = "X-ReconSync-Signature"
@@ -36,7 +37,7 @@ class SignatureError(Exception):
 
 
 def verify_signature(
-    secret: str,
+    secret: str | Sequence[str],
     header: str | None,
     body: bytes | str,
     *,
@@ -65,22 +66,39 @@ def verify_signature(
             )
 
     raw = body.encode("utf-8") if isinstance(body, str) else body
-    expected = hmac.new(
-        secret.encode("utf-8"), f"{timestamp}.".encode("utf-8") + raw, sha256
-    ).hexdigest()
+    # A sequence accepts a rotation from your side: hold the old and the new
+    # while the sender changes over, then drop the old.
+    secrets = [secret] if isinstance(secret, str) else list(secret)
 
-    # compare_digest, not ==: a byte-by-byte comparison leaks how much of the
-    # signature was correct, which is enough to forge one a byte at a time.
-    if not hmac.compare_digest(expected, provided):
+    matched = False
+    for candidate in secrets:
+        expected = hmac.new(
+            candidate.encode("utf-8"), f"{timestamp}.".encode("utf-8") + raw, sha256
+        ).hexdigest()
+        for given in provided:
+            # compare_digest, not ==: a byte-by-byte comparison leaks how much
+            # of the signature was correct, which is enough to forge one a byte
+            # at a time. Every pair is checked even after one matches, so the
+            # time taken does not depend on which one did.
+            if hmac.compare_digest(expected, given):
+                matched = True
+
+    if not matched:
         raise SignatureError("mismatch", "signature does not match")
 
 
-def _parse_header(header: str | None) -> tuple[int, str]:
+def _parse_header(header: str | None) -> tuple[int, list[str]]:
+    """Read the timestamp and *every* signature the header carries.
+
+    Several ``v1`` entries is the normal state while the sender rotates its
+    secret, so they are all collected. Keeping only the last would make the
+    sender's ordering decide whether your receiver worked.
+    """
     if not header:
         raise SignatureError("malformed", f"missing {SIGNATURE_HEADER} header")
 
     timestamp = 0
-    signature = ""
+    signatures: list[str] = []
     for part in header.split(","):
         key, sep, value = part.strip().partition("=")
         if not sep:
@@ -90,12 +108,12 @@ def _parse_header(header: str | None) -> tuple[int, str]:
                 timestamp = int(value)
             except ValueError as exc:
                 raise SignatureError("malformed", "timestamp is not a number") from exc
-        elif key == "v1":
-            signature = value
+        elif key == "v1" and value:
+            signatures.append(value)
 
-    if not timestamp or not signature:
+    if not timestamp or not signatures:
         raise SignatureError("malformed", f"{SIGNATURE_HEADER} is missing t or v1")
-    return timestamp, signature
+    return timestamp, signatures
 
 
 @dataclass(frozen=True)
@@ -146,7 +164,7 @@ class Webhook:
 
 
 def parse_webhook(
-    secret: str,
+    secret: str | Sequence[str],
     header: str | None,
     body: bytes | str,
     *,

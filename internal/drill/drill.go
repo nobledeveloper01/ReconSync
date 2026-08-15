@@ -78,7 +78,7 @@ type Sender interface {
 type Runner struct {
 	store   store.WebhookStore
 	sender  Sender
-	secrets func(ctx context.Context, ref string) (string, error)
+	secrets func(ctx context.Context, ref string) ([]string, error)
 	now     func() time.Time
 	timeout time.Duration
 }
@@ -87,7 +87,7 @@ type Runner struct {
 type Options struct {
 	Store   store.WebhookStore
 	Sender  Sender
-	Secrets func(ctx context.Context, ref string) (string, error)
+	Secrets func(ctx context.Context, ref string) ([]string, error)
 	Now     func() time.Time
 	Timeout time.Duration
 }
@@ -190,7 +190,7 @@ func (r *Runner) Run(ctx context.Context, tenantID string) (Report, error) {
 func (r *Runner) deliver(ctx context.Context, tenantID, txnID string, ep *store.WebhookEndpoint, payload []byte) Result {
 	res := Result{EndpointID: ep.ID, URL: ep.URL}
 
-	secret, err := r.secrets(ctx, ep.SecretRef)
+	secrets, err := r.secrets(ctx, ep.SecretRef)
 	if err != nil {
 		res.Error = "could not resolve the signing secret"
 		res.Diagnosis = "the drill never left ReconSync; this is our fault, not yours"
@@ -205,7 +205,7 @@ func (r *Runner) deliver(ctx context.Context, tenantID, txnID string, ep *store.
 		EndpointID:    ep.ID,
 		TransactionID: txnID,
 		URL:           ep.URL,
-		Secret:        secret,
+		Secrets:       secrets,
 		Event:         webhook.EventReversalTriggered,
 		Payload:       payload,
 		Drill:         true,

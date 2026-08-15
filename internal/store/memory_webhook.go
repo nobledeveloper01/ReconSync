@@ -34,6 +34,18 @@ func (m *Memory) SetEndpointEnabled(_ context.Context, tenantID, id string, enab
 	return nil
 }
 
+func (m *Memory) SetEndpointSecretRef(_ context.Context, tenantID, id, ref string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ep, ok := m.endpoints[id]
+	if !ok || ep.TenantID != tenantID {
+		return ErrNotFound
+	}
+	ep.SecretRef = ref
+	return nil
+}
+
 func (m *Memory) DeleteEndpoint(_ context.Context, tenantID, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

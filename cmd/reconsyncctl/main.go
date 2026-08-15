@@ -38,6 +38,7 @@ Usage:
                                [--allow-private] [--allow-insecure]  (dev only)
   reconsyncctl endpoints list --tenant ID
   reconsyncctl endpoints test --tenant ID --id ENDPOINT_ID
+  reconsyncctl endpoints rotate --tenant ID --id EP --to env://NEW [--finish]
   reconsyncctl rules create --tenant ID --window SECONDS [--type T] [--provider P]
   reconsyncctl rules list --tenant ID
   reconsyncctl rules delete --tenant ID --id RULE_ID
@@ -103,6 +104,7 @@ func run(args []string) error {
 			"create": endpointsCreate,
 			"list":   endpointsList,
 			"test":   endpointsTest,
+			"rotate": endpointsRotate,
 		})
 
 	case "rules":

@@ -124,3 +124,40 @@ def test_the_amount_to_reverse_is_what_is_outstanding():
         event="reversal.triggered", occurred_at="", data={"amount_minor": 10_000}, raw={}
     )
     assert whole.amount_to_reverse_minor == 10_000
+
+
+def test_a_rotated_payload_verifies_with_either_secret():
+    # Rotation, from the receiving side. A payload signed with two secrets must
+    # verify with either one alone, or rotating breaks every receiver that has
+    # not been redeployed yet — which is what rotation is meant to avoid.
+    fixture = next(f for f in FIXTURES if f["name"] == "rotating")
+    assert fixture["header"].count("v1=") == 2, "the fixture carries one signature"
+
+    for secret in fixture["verify_with"]:
+        verify_signature(secret, fixture["header"], fixture["body"], now=fixture["timestamp"])
+
+    # Only those two. A second signature must not become a second way in.
+    for secret in fixture["reject_with"]:
+        with pytest.raises(SignatureError):
+            verify_signature(secret, fixture["header"], fixture["body"], now=fixture["timestamp"])
+
+
+def test_holding_several_secrets_verifies_a_single_secret_signature():
+    # And from the sending side: a receiver holding both while the sender is
+    # still on one. The two halves let each side change on its own schedule.
+    fixture = next(f for f in FIXTURES if f["name"] == "reversal")
+
+    verify_signature(
+        ["whsec_something_old", fixture["secret"]],
+        fixture["header"],
+        fixture["body"],
+        now=fixture["timestamp"],
+    )
+
+    with pytest.raises(SignatureError):
+        verify_signature(
+            ["whsec_something_old", "whsec_also_wrong"],
+            fixture["header"],
+            fixture["body"],
+            now=fixture["timestamp"],
+        )

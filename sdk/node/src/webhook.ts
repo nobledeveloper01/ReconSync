@@ -35,7 +35,7 @@ export class SignatureError extends Error {
  * `express.raw({ type: "application/json" })` on this route, not `express.json()`.
  */
 export function verifySignature(
-  secret: string,
+  secret: string | string[],
   header: string | undefined | null,
   body: Buffer | string,
   options: { nowSeconds?: number; toleranceSeconds?: number } = {},
@@ -43,7 +43,7 @@ export function verifySignature(
   const now = options.nowSeconds ?? Math.floor(Date.now() / 1000);
   const tolerance = options.toleranceSeconds ?? DEFAULT_TOLERANCE_SECONDS;
 
-  const { timestamp, signature } = parseHeader(header);
+  const { timestamp, signatures } = parseHeader(header);
 
   if (tolerance > 0 && Math.abs(now - timestamp) > tolerance) {
     // Bounded replay: a request captured off the wire stops working shortly
@@ -55,31 +55,51 @@ export function verifySignature(
   }
 
   const raw = typeof body === "string" ? Buffer.from(body, "utf8") : body;
-  const expected = createHmac("sha256", secret)
-    .update(`${timestamp}.`)
-    .update(raw)
-    .digest("hex");
+  // An array accepts a rotation from your side: hold the old and the new while
+  // the sender changes over, then drop the old.
+  const secrets = Array.isArray(secret) ? secret : [secret];
 
-  const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(signature, "utf8");
-  // Length is checked first because timingSafeEqual throws on a mismatch, and
-  // the comparison itself is constant time so a wrong signature does not reveal
-  // how much of it was right.
-  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+  let matched = false;
+  for (const candidate of secrets) {
+    const expected = Buffer.from(
+      createHmac("sha256", candidate).update(`${timestamp}.`).update(raw).digest("hex"),
+      "utf8",
+    );
+
+    for (const provided of signatures) {
+      const given = Buffer.from(provided, "utf8");
+      // Length first because timingSafeEqual throws on a mismatch; the
+      // comparison itself is constant time, so a wrong signature does not
+      // reveal how much of it was right. Every pair is checked even after one
+      // matches, so the time taken does not depend on which one did.
+      if (expected.length === given.length && timingSafeEqual(expected, given)) {
+        matched = true;
+      }
+    }
+  }
+
+  if (!matched) {
     throw new SignatureError("mismatch", "signature does not match");
   }
 }
 
+/**
+ * Reads the timestamp and **every** signature the header carries.
+ *
+ * Several v1 entries is the normal state while the sender rotates its secret,
+ * so they are all collected. Keeping only the last would make the sender's
+ * ordering decide whether your receiver worked.
+ */
 function parseHeader(header: string | undefined | null): {
   timestamp: number;
-  signature: string;
+  signatures: string[];
 } {
   if (!header) {
     throw new SignatureError("malformed", `missing ${SIGNATURE_HEADER} header`);
   }
 
   let timestamp = 0;
-  let signature = "";
+  const signatures: string[] = [];
   for (const part of header.split(",")) {
     const [key, value] = part.trim().split("=", 2);
     if (value === undefined) {
@@ -90,15 +110,15 @@ function parseHeader(header: string | undefined | null): {
       if (!Number.isFinite(timestamp)) {
         throw new SignatureError("malformed", "timestamp is not a number");
       }
-    } else if (key === "v1") {
-      signature = value;
+    } else if (key === "v1" && value) {
+      signatures.push(value);
     }
   }
 
-  if (!timestamp || !signature) {
+  if (!timestamp || signatures.length === 0) {
     throw new SignatureError("malformed", `${SIGNATURE_HEADER} is missing t or v1`);
   }
-  return { timestamp, signature };
+  return { timestamp, signatures };
 }
 
 // --- payload shapes ---
@@ -159,7 +179,7 @@ export interface WebhookEnvelope {
 
 /** Verify and parse in one step, in the order that keeps you safe. */
 export function parseWebhook(
-  secret: string,
+  secret: string | string[],
   header: string | undefined | null,
   body: Buffer | string,
   options?: { nowSeconds?: number; toleranceSeconds?: number },

@@ -30,9 +30,9 @@ const (
 	DefaultConcurrency = 8
 )
 
-// SecretResolver turns an endpoint's secret reference into the signing secret.
+// SecretResolver turns an endpoint's secret reference into its signing secrets.
 // Production resolves through KMS; the reference is what is stored (§5).
-type SecretResolver func(ctx context.Context, ref string) (string, error)
+type SecretResolver func(ctx context.Context, ref string) ([]string, error)
 
 // Dispatcher delivers queued webhooks with retries and dead-lettering.
 type Dispatcher struct {
@@ -188,7 +188,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context) (DispatchResult, error) {
 
 // attempt performs one delivery and writes back what it decided.
 func (d *Dispatcher) attempt(ctx context.Context, item *store.DueDelivery) (webhook.DeliveryStatus, error) {
-	secret, err := d.secrets(ctx, item.SecretRef)
+	secrets, err := d.secrets(ctx, item.SecretRef)
 	if err != nil {
 		return "", err
 	}
@@ -199,7 +199,7 @@ func (d *Dispatcher) attempt(ctx context.Context, item *store.DueDelivery) (webh
 		EndpointID:    item.EndpointID,
 		TransactionID: item.TransactionID,
 		URL:           item.URL,
-		Secret:        secret,
+		Secrets:       secrets,
 		Event:         webhook.EventType(item.EventType),
 		Payload:       item.Payload,
 		Attempt:       item.Attempt,
