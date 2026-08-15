@@ -6,10 +6,23 @@ build-backend = "setuptools.build_meta"
 name = "reconsync"
 version = "0.1.0"
 description = "Report transaction legs to ReconSync and verify its reversal webhooks."
+readme = "README.md"
 requires-python = ">=3.10"
+keywords = ["reconciliation", "webhooks", "payments", "fintech", "reversal"]
+classifiers = [
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Office/Business :: Financial",
+  "Typing :: Typed",
+]
 # No dependencies, on purpose: this goes into a payment service, where every
 # package added is one a security team has to approve.
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/nobledeveloper01/ReconSync"
+Source = "https://github.com/nobledeveloper01/ReconSync/tree/main/sdk/python"
+Issues = "https://github.com/nobledeveloper01/ReconSync/issues"
 
 [tool.setuptools.packages.find]
 include = ["reconsync*"]

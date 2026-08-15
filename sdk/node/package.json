@@ -12,6 +12,14 @@
     }
   },
   "files": ["dist", "README.md"],
+  "keywords": ["reconciliation", "webhooks", "payments", "fintech", "reversal"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nobledeveloper01/ReconSync.git",
+    "directory": "sdk/node"
+  },
+  "homepage": "https://github.com/nobledeveloper01/ReconSync/tree/main/sdk/node",
+  "bugs": "https://github.com/nobledeveloper01/ReconSync/issues",
   "engines": { "node": ">=18" },
   "scripts": {
     "build": "tsc",

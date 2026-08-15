@@ -7,6 +7,12 @@ library only, Python 3.10 or later.
 pip install reconsync
 ```
 
+Not published yet. Until it is, install from the repository:
+
+```bash
+pip install "git+https://github.com/nobledeveloper01/ReconSync.git#subdirectory=sdk/python"
+```
+
 ## Reporting
 
 ```python

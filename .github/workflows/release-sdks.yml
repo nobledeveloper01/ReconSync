@@ -1,0 +1,88 @@
+# Publishes the Node and Python client libraries.
+#
+# Triggered by a tag, never by a push to main. Publishing is close to
+# irreversible — npm refuses to unpublish after 72 hours and PyPI never lets a
+# version number be reused — so it has to be something someone did on purpose,
+# not something a merge can cause.
+name: release-sdks
+
+on:
+  push:
+    tags:
+      - 'sdk-v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and check the packages without publishing'
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Trusted publishing to PyPI, so no long-lived token is stored anywhere.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The tests run again here rather than trusting that CI passed on the
+      # commit. A tag can point anywhere, including at a commit that never went
+      # through CI, and this is the last chance to catch that.
+      - name: Node tests
+        working-directory: sdk/node
+        run: |
+          npm ci
+          npm run build
+          node --test test/*.test.js
+
+      - name: Python tests
+        working-directory: sdk/python
+        run: |
+          python -m pip install --quiet pytest build twine
+          python -m pytest tests/ -q
+
+      - name: Build the Python package
+        working-directory: sdk/python
+        run: |
+          python -m build
+          # Refuses a package PyPI would reject, before anything is uploaded.
+          python -m twine check dist/*
+
+      - name: Check the versions match the tag
+        if: startsWith(github.ref, 'refs/tags/sdk-v')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/sdk-v}"
+          NODE=$(node -p "require('./sdk/node/package.json').version")
+          PY=$(grep -m1 '^version' sdk/python/pyproject.toml | cut -d'"' -f2)
+          echo "tag=$TAG node=$NODE python=$PY"
+          # A tag that disagrees with the manifests publishes a version nobody
+          # can find from the repository, and the number cannot be reused.
+          if [ "$TAG" != "$NODE" ] || [ "$TAG" != "$PY" ]; then
+            echo "::error::the tag and the package versions disagree"
+            exit 1
+          fi
+
+      - name: Publish to npm
+        if: startsWith(github.ref, 'refs/tags/sdk-v')
+        working-directory: sdk/node
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to PyPI
+        if: startsWith(github.ref, 'refs/tags/sdk-v')
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist

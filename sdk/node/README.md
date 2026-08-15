@@ -7,6 +7,12 @@ dependencies, Node 18 or later.
 npm install @reconsync/sdk
 ```
 
+Not published yet. Until it is, install from the repository:
+
+```bash
+npm install github:nobledeveloper01/ReconSync#main --workspace-root  # or vendor sdk/node
+```
+
 ## Reporting
 
 ```ts
