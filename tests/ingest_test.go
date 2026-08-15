@@ -43,6 +43,8 @@ type fixtureOpts struct {
 	ruleSet   *rules.Set
 	ready     func(ctx context.Context) error
 	blockPipe bool // hold the worker so the queue fills, for backpressure
+
+	reportsPerMinute float64
 }
 
 func newIngestFixture(t *testing.T, opts fixtureOpts) *ingestFixture {
@@ -130,9 +132,10 @@ func newIngestFixture(t *testing.T, opts fixtureOpts) *ingestFixture {
 			}
 			return opts.dashboard
 		}(),
-		Licence: opts.licence,
-		Auth:    authenticator,
-		Ready:   opts.ready,
+		Licence:          opts.licence,
+		Auth:             authenticator,
+		Ready:            opts.ready,
+		ReportsPerMinute: opts.reportsPerMinute,
 	})
 	if err != nil {
 		t.Fatalf("ingest.New: %v", err)

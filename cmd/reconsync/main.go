@@ -83,6 +83,11 @@ type config struct {
 	// investigation rather than advised as a reversal. Zero keeps every verdict.
 	minReversalConfidence float64
 
+	// reportsPerMinute and drillsPerHour bound one tenant's share of a shared
+	// deployment. Negative turns a limit off; zero means the default.
+	reportsPerMinute float64
+	drillsPerHour    float64
+
 	// reversalDeadline is the regulatory clock the sla.at_risk warning and the
 	// compliance report both measure against. slaWarnBefore is how much notice
 	// the warning gives; negative disables it.
@@ -128,6 +133,29 @@ func loadConfig() (config, error) {
 		}
 		c.reversalDeadline = time.Duration(secs) * time.Second
 	}
+	for _, limit := range []struct {
+		name  string
+		value *float64
+	}{
+		{"RECONSYNC_REPORTS_PER_MINUTE", &c.reportsPerMinute},
+		{"RECONSYNC_DRILLS_PER_HOUR", &c.drillsPerHour},
+	} {
+		raw := os.Getenv(limit.name)
+		if raw == "" {
+			continue
+		}
+		n, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return c, fmt.Errorf("%s must be a number, got %q", limit.name, raw)
+		}
+		// Zero would be indistinguishable from unset, and a limit of nothing is
+		// not a limit anyone means. Negative is how it is turned off.
+		if n == 0 {
+			return c, fmt.Errorf("%s must be positive, or negative to disable the limit", limit.name)
+		}
+		*limit.value = n
+	}
+
 	if raw := os.Getenv("RECONSYNC_SLA_WARN_BEFORE_SECONDS"); raw != "" {
 		secs, err := strconv.Atoi(raw)
 		if err != nil {
@@ -298,8 +326,14 @@ func run() error {
 		Dashboard: webembed.FS(),
 		Auth:      authenticator,
 		Accounts:  account.NewService(db, time.Now),
-		Logger:    log,
-		Ready:     func(ctx context.Context) error { return pool.Ping(ctx) },
+		// Per-tenant, so one tenant's runaway loop cannot starve the others.
+		// Ingest is deliberately not limited: a debit that is refused is never
+		// observed, and a transaction never observed is one whose failure can
+		// never be detected.
+		ReportsPerMinute: cfg.reportsPerMinute,
+		DrillsPerHour:    cfg.drillsPerHour,
+		Logger:           log,
+		Ready:            func(ctx context.Context) error { return pool.Ping(ctx) },
 	})
 	if err != nil {
 		return err

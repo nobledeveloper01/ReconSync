@@ -18,6 +18,7 @@ import (
 	"github.com/nobledeveloper01/ReconSync/internal/licence"
 	"github.com/nobledeveloper01/ReconSync/internal/metrics"
 	"github.com/nobledeveloper01/ReconSync/internal/pipeline"
+	"github.com/nobledeveloper01/ReconSync/internal/ratelimit"
 	"github.com/nobledeveloper01/ReconSync/internal/rules"
 	"github.com/nobledeveloper01/ReconSync/internal/store"
 )
@@ -96,6 +97,14 @@ type Options struct {
 
 	// RetryAfter is what a backpressured client is told to wait.
 	RetryAfter time.Duration
+
+	// ReportsPerMinute bounds how often one tenant may run the reports that
+	// scan its history. Zero uses the default; a negative value turns it off.
+	ReportsPerMinute float64
+
+	// DrillsPerHour bounds fire drills, which send real webhooks to real
+	// endpoints and are therefore an amplifier as well as a cost.
+	DrillsPerHour float64
 }
 
 // DrillRunner delivers a synthetic reversal to the tenant's own endpoints. An
@@ -129,7 +138,20 @@ type Server struct {
 	maxBody     int64
 	maxBulkBody int64
 	retryAfter  time.Duration
+
+	reportLimit *ratelimit.Limiter
+	drillLimit  *ratelimit.Limiter
 }
+
+// Defaults for the per-tenant limits.
+//
+// Generous on purpose. These exist so one tenant's runaway loop cannot starve
+// the others, not to meter usage — a limit low enough to be felt in normal
+// operation would be a support ticket a week.
+const (
+	DefaultReportsPerMinute = 60
+	DefaultDrillsPerHour    = 6
+)
 
 // New builds a Server.
 func New(opts Options) (*Server, error) {
@@ -182,6 +204,25 @@ func New(opts Options) (*Server, error) {
 		s.retryAfter = time.Second
 	}
 
+	reports := opts.ReportsPerMinute
+	if reports == 0 {
+		reports = DefaultReportsPerMinute
+	}
+	drills := opts.DrillsPerHour
+	if drills == 0 {
+		drills = DefaultDrillsPerHour
+	}
+	// A negative value is how a deployment turns a limit off, which the
+	// limiter reads as a rate of zero.
+	//
+	// Reports may burst a full minute's worth at once — a dashboard opening
+	// draws several at a time, and holding that to a trickle would make the
+	// limit felt in normal use rather than only by a runaway loop. Drills get a
+	// burst of two whatever the rate: each one sends real webhooks to a real
+	// endpoint, so back-to-back is generous already.
+	s.reportLimit = ratelimit.New(max(reports, 0), time.Minute, int(max(reports, 1)))
+	s.drillLimit = ratelimit.New(max(drills, 0), time.Hour, 2)
+
 	s.handler = s.routes()
 	return s, nil
 }
@@ -206,13 +247,18 @@ func (s *Server) routes() http.Handler {
 	api.Handle("GET /v1/transactions", s.need(read, s.handleListTransactions))
 	api.Handle("GET /v1/transactions/{transaction_id}", s.need(read, s.handleGetTransaction))
 	api.Handle("GET /v1/licence", s.need(read, s.handleLicence))
-	api.Handle("GET /v1/audit/verify", s.need(read, s.handleAuditVerify))
-	api.Handle("GET /v1/audit/checkpoints", s.need(read, s.handleAuditCheckpoints))
-	api.Handle("GET /v1/reports/reversal-compliance", s.need(read, s.handleComplianceReport))
-	api.Handle("GET /v1/reports/providers", s.need(read, s.handleProviderScorecard))
-	api.Handle("GET /v1/reports/exposure", s.need(read, s.handleExposure))
-	api.Handle("GET /v1/reports/window-fit", s.need(read, s.handleWindowFit))
-	api.Handle("POST /v1/fire-drill", s.need(write, s.handleFireDrill))
+	// The reports scan a tenant's history, so one tenant looping over them is
+	// felt by every other tenant on the deployment.
+	api.Handle("GET /v1/audit/verify", s.need(read, s.limitReports(s.handleAuditVerify)))
+	api.Handle("GET /v1/audit/checkpoints", s.need(read, s.limitReports(s.handleAuditCheckpoints)))
+	api.Handle("GET /v1/reports/reversal-compliance", s.need(read, s.limitReports(s.handleComplianceReport)))
+	api.Handle("GET /v1/reports/providers", s.need(read, s.limitReports(s.handleProviderScorecard)))
+	api.Handle("GET /v1/reports/exposure", s.need(read, s.limitReports(s.handleExposure)))
+	api.Handle("GET /v1/reports/window-fit", s.need(read, s.limitReports(s.handleWindowFit)))
+
+	// A drill sends real webhooks to real endpoints, so it is an amplifier as
+	// well as a cost — and one aimed at somebody else's URL.
+	api.Handle("POST /v1/fire-drill", s.need(write, s.limitDrills(s.handleFireDrill)))
 	api.Handle("POST /v1/reversals/{transaction_id}/claim", s.need(write, s.handleClaimReversal))
 	api.Handle("POST /v1/reversals/{transaction_id}/claim/release", s.need(write, s.handleReleaseReversalClaim))
 	if s.webhooks != nil {
@@ -262,6 +308,39 @@ func (s *Server) routes() http.Handler {
 	s.mountDashboard(root)
 
 	return s.recoverPanics(s.withRequestID(root))
+}
+
+// limitReports bounds the tenant's rate of history-scanning reads.
+func (s *Server) limitReports(h http.HandlerFunc) http.HandlerFunc {
+	return s.limit(s.reportLimit, h,
+		"this tenant is running reports faster than the deployment will serve them")
+}
+
+// limitDrills bounds the tenant's rate of fire drills.
+func (s *Server) limitDrills(h http.HandlerFunc) http.HandlerFunc {
+	return s.limit(s.drillLimit, h,
+		"a fire drill sends real webhooks to your endpoints; they are deliberately rationed")
+}
+
+func (s *Server) limit(l *ratelimit.Limiter, h http.HandlerFunc, message string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := auth.PrincipalFrom(r.Context())
+		if !ok {
+			h(w, r)
+			return
+		}
+
+		// Keyed by tenant, not by caller. The limit is the tenant's share of a
+		// shared deployment, and issuing a second API key should not double it.
+		allowed, wait := l.Allow(principal.TenantID, s.now())
+		if allowed {
+			h(w, r)
+			return
+		}
+
+		w.Header().Set("Retry-After", retryAfterSeconds(wait))
+		s.writeError(w, r, http.StatusTooManyRequests, "rate_limited", message, "")
+	}
 }
 
 // need wraps a handler in the scope it requires.

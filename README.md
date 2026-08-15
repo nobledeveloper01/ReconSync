@@ -1190,6 +1190,28 @@ server models as an ingest gap (B1), arriving from the customer's side instead.
 could not drain, because a queue silently lost at every rolling restart is a gap
 in the record nobody would ever notice.
 
+### `internal/ratelimit` — and the endpoint that is deliberately not limited
+
+Limits are per **tenant**, not per key: the limit is a tenant's share of a shared
+deployment, and issuing a second API key should not double it.
+
+Two things are limited. The reports scan a tenant's history, so one tenant
+looping over them is felt by everyone else. Fire drills send real webhooks to
+real endpoints, which makes them an amplifier as well as a cost — and one aimed
+at somebody else's URL. Both answer `429` with a `Retry-After` that says how long.
+
+**Ingest is not limited, on purpose.** A debit that is refused is a debit
+ReconSync never observes, and a transaction it never observes is one whose
+failure it can never detect: the customer believes they are covered and is not,
+silently and on our signature. That is the same reasoning that keeps licence
+expiry away from ingest. Ingest is protected by backpressure instead — `503`
+with `Retry-After` when the pipeline queue is full, which is temporary and which
+every SDK retries.
+
+The defaults are generous because these exist to stop a runaway loop, not to
+meter usage. A limit low enough to be felt in normal operation is a support
+ticket a week.
+
 ### `internal/secret` — one secret per endpoint, and rotating it
 
 An endpoint row stores a **reference**, never a secret: `env://ACME_WEBHOOK_SECRET`
@@ -1654,6 +1676,8 @@ and asserts every row is claimed exactly once.
 | `RECONSYNC_SLA_WARN_BEFORE_SECONDS` | no | `14400` | How much notice `sla.at_risk` gives. Negative disables it |
 | `RECONSYNC_CHECKPOINT_KEY` | no | — | Ed25519 key signing audit chain heads. Unset means a wholesale rewrite is undetectable, and `/v1/audit/verify` says so |
 | `RECONSYNC_CHECKPOINT_INTERVAL_SECONDS` | no | `3600` | How often heads are signed. The interval is the window an attacker can rewrite undetected |
+| `RECONSYNC_REPORTS_PER_MINUTE` | no | `60` | Per tenant, on the history-scanning reports. Negative disables it |
+| `RECONSYNC_DRILLS_PER_HOUR` | no | `6` | Per tenant, on fire drills. Negative disables it |
 | `RECONSYNC_ALLOW_PRIVATE_WEBHOOK_TARGETS` | no | `false` | **Local development only.** Disables the SSRF guard so webhooks can reach loopback. |
 
 The two secrets are required rather than defaulted: starting with a predictable
@@ -1721,6 +1745,7 @@ cmd/reconsync-echo/  reference webhook receiver — the worked example of how to
                      verify a signature before trusting a payload
 scripts/demo.sh      what `make demo` runs
 internal/domain/     transaction types + state machine (no infrastructure deps)
+internal/ratelimit/  per-tenant limits on the expensive endpoints
 internal/rules/      reconciliation window resolution
 internal/secret/     resolves an endpoint's signing secret from its reference
 internal/store/      persistence port, in-memory and Postgres implementations
@@ -1816,3 +1841,4 @@ is delivered to the registered endpoint.
 | Password recovery: admin-issued link, and CLI for the locked-out admin | Done |
 | Client libraries: Go, Node, Python | Done — one signature, three implementations, cross-checked |
 | Per-endpoint signing secrets, and rotation without a cutover | Done |
+| Per-tenant rate limits on reports and drills, never on ingest | Done |
