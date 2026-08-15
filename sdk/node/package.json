@@ -1,0 +1,26 @@
+{
+  "name": "@reconsync/sdk",
+  "version": "0.1.0",
+  "description": "Report transaction legs to ReconSync and verify its reversal webhooks.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc --noEmit -p tsconfig.test.json && node --test test/*.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "~5.7.0"
+  },
+  "license": "SEE LICENSE IN ../../LICENSE"
+}

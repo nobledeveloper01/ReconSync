@@ -24,7 +24,7 @@ test: ## Unit tests with the race detector (no database needed)
 	go test -race ./tests/...
 
 test-integration: db-setup ## Full suite including Postgres integration tests
-	RECONSYNC_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -race -coverpkg=./internal/... ./tests/...
+	RECONSYNC_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -race -coverpkg=./internal/...,./pkg/... ./tests/...
 
 test-isolation: db-setup ## Tenant isolation gate on its own (§8.1)
 	RECONSYNC_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -race ./tests/... -run 'Store/TenantIsolation' -v
@@ -81,4 +81,8 @@ migrate-down: ## Roll every migration back on TEST_DB, newest first
 	@# against a database with no tables in it.
 	@psql -q -d $(TEST_DB) -c "TRUNCATE schema_migrations" 2>/dev/null || true
 
-ci: fmt vet crosscheck lint test-integration ## What CI runs
+test-sdks: ## The Node and Python client libraries, against the Go-signed fixtures
+	cd sdk/node && npm install --silent && npm run build && node --test test/*.test.js
+	cd sdk/python && python3 -m pytest tests/ -q
+
+ci: fmt vet crosscheck lint test-integration test-sdks ## What CI runs

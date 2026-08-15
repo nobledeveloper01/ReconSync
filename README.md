@@ -1156,6 +1156,40 @@ Ed25519, so shipping the verifier does not ship the ability to mint licences.
 It is still theatre — the customer compiles this source and one line defeats it
 permanently. It is bookkeeping for honest customers, and priced accordingly.
 
+### `pkg/reconsync` — the client library, and why it is not internal
+
+Everything an integrating service needs, and nothing only the server needs.
+Standard library only, so adding it to a payment service brings in no transitive
+dependencies to review.
+
+It is public for one concrete reason. Verifying a webhook signature is the single
+security-critical thing every receiver must do, ReconSync already had a correct
+implementation, and being under `internal/` meant no customer could import it —
+so every Go integration would have written its own, which is where timing leaks
+and missing replay checks come from. `internal/webhook` now aliases this package
+rather than holding a second copy: a receiver has to verify exactly what the
+sender signed, and the surest way to have those disagree is to write them twice.
+
+The part worth reading is `Reporter`. The naive integration —
+
+```go
+if err := client.ReportDebit(ctx, debit); err != nil {
+    return err   // don't
+}
+```
+
+— makes a reconciliation service having a bad afternoon into a reason a
+customer's transfer fails, which is strictly worse than not reconciling it. So
+`Reporter.ReportDebit` queues, never blocks, never returns an error, and drops
+rather than waiting when the buffer is full.
+
+It does not drop *silently*. A dropped debit is a transaction ReconSync will
+never see and therefore can never detect the failure of — the same blind spot the
+server models as an ingest gap (B1), arriving from the customer's side instead.
+`OnDrop` is where that becomes their alert, and `Close` says out loud what it
+could not drain, because a queue silently lost at every rolling restart is a gap
+in the record nobody would ever notice.
+
 ### `internal/webhook` — signing, retries, and not getting used as an SSRF pivot
 
 Signatures are HMAC-SHA256 over `{timestamp}.{body}`, sent as
@@ -1488,6 +1522,19 @@ API key, or the session cookie a browser holds. They resolve to the same
 principal. Cookie-authenticated writes additionally need the CSRF token echoed in
 `X-ReconSync-CSRF`.
 
+### Integrating
+
+Three client libraries, in [`sdk/`](sdk/) and [`pkg/reconsync`](pkg/reconsync/):
+Go, Node and Python, none with a dependency. They do two things — report the
+legs, and verify the webhook — and each ships a `Reporter` that queues rather
+than blocking, so a reconciliation outage can never become a failed payment.
+
+The signature is the one place three implementations could quietly diverge, so
+`sdk/fixtures/signatures.json` holds signatures the Go server produced and all
+three verify against them in their own suites. An implementation that only agrees
+with itself would sign and verify its own output happily while rejecting every
+signature the server actually sends.
+
 Ingest is asynchronous, so both event endpoints return `202 Accepted` rather
 than a reconciled result — at the moment the handler replies, the outcome is
 genuinely not known yet.
@@ -1603,6 +1650,7 @@ make demo              # end to end in one command, see above
 make test              # unit tests, race detector, no database needed
 make test-integration  # full suite against a local Postgres
 make test-isolation    # the tenant isolation gate on its own
+make test-sdks         # the Node and Python clients, against Go-signed fixtures
 make lint              # golangci-lint, pinned to the version CI uses
 make vuln              # govulncheck
 make crosscheck        # build for linux/amd64, which is what CI runs
@@ -1618,7 +1666,7 @@ CI. That has already happened once.
 
 **Tests live in `tests/`**, not beside the code, and therefore exercise only the
 exported API — the same surface a caller gets. Coverage needs
-`-coverpkg=./internal/...`, which the Makefile and CI already pass.
+`-coverpkg=./internal/...,./pkg/...`, which the Makefile and CI already pass.
 
 Migrations ship as `.up.sql`/`.down.sql` pairs. The down files are what let the
 test harness reset to a known schema, and running `up → down → up` in the gate is
@@ -1643,6 +1691,10 @@ internal/pipeline/   bounded worker pool, batching, backpressure
 internal/auth/       API key issue and verification
 internal/account/    users, passwords, sessions, TOTP, recovery, roles
 internal/ingest/     HTTP API, health, readiness, metrics
+pkg/reconsync/       the public client library: reporting, and webhook verification
+sdk/node/            the Node client library (TypeScript, no dependencies)
+sdk/python/          the Python client library (standard library only)
+sdk/fixtures/        Go-signed signatures every SDK verifies against
 internal/audit/      the verifiable hash chain and its signed checkpoints
 internal/evidence/   what a verdict rests on, and how sure we are
 internal/health/     records whether our own view of each tenant was intact
@@ -1700,4 +1752,4 @@ is delivered to the registered endpoint.
 | Two-factor: TOTP + single-use recovery codes, QR enrolment | Done |
 | Roles and permissions, mapped onto the existing scopes | Done |
 | Password recovery: admin-issued link, and CLI for the locked-out admin | Done |
-| SDKs | **Not started** |
+| Client libraries: Go, Node, Python | Done — one signature, three implementations, cross-checked |

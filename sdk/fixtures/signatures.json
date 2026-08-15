@@ -1,0 +1,78 @@
+[
+  {
+    "name": "reversal",
+    "secret": "whsec_fixture_not_a_real_secret",
+    "timestamp": 1767225600,
+    "body": "{\"event\":\"reversal.triggered\",\"occurred_at\":\"2026-01-01T00:00:00Z\",\"data\":{\"transaction_id\":\"TX-1\",\"amount_minor\":5000000,\"currency\":\"NGN\",\"advisory\":true,\"confidence\":0.9,\"debit_at\":\"2026-01-01T00:00:00Z\",\"window_seconds\":300,\"regulatory_deadline\":\"2026-01-02T00:00:00Z\"}}",
+    "header": "t=1767225600,v1=9aaebf01d2f79d7ad98dc653c4fa1d1f87f4ee4b03745e55b6b4b204a5bb895a",
+    "valid": true
+  },
+  {
+    "name": "unicode",
+    "secret": "whsec_fixture_not_a_real_secret",
+    "timestamp": 1767225600,
+    "body": "{\"event\":\"transaction.suspect\",\"customer\":\"Adébáyọ̀ Ọlámidé\",\"note\":\"naira ₦ sign\"}",
+    "header": "t=1767225600,v1=1dfd934981f2227d39e2468ec076687f22e00be0078126d1e4107fb5e63a07d1",
+    "valid": true
+  },
+  {
+    "name": "empty",
+    "secret": "whsec_fixture_not_a_real_secret",
+    "timestamp": 1767225600,
+    "body": "{}",
+    "header": "t=1767225600,v1=df9621853e9e17fe25790efd7a05a3f579dfd265b0c6188f37b9c097bbfaa4df",
+    "valid": true
+  },
+  {
+    "name": "nested",
+    "secret": "whsec_fixture_not_a_real_secret",
+    "timestamp": 1767225600,
+    "body": "{\"a\":{\"b\":[1,2,3]},\"c\":\"}{,=\\\"escaped\"}",
+    "header": "t=1767225600,v1=1e439b5174e12e41f620d7a31eccf5223344129e88c52209320b6ab59d2ba854",
+    "valid": true
+  },
+  {
+    "name": "spaced",
+    "secret": "whsec_fixture_not_a_real_secret",
+    "timestamp": 1767225600,
+    "body": "{\n  \"event\": \"transaction.reconciled\",\n  \"data\": { \"transaction_id\": \"TX-2\" }\n}",
+    "header": "t=1767225600,v1=935fb70a6b64696f9beb735f73d2a3fc70970bfb775899cf772509c3a930faec",
+    "valid": true
+  },
+  {
+    "name": "tampered-body",
+    "secret": "whsec_fixture_not_a_real_secret",
+    "timestamp": 1767225600,
+    "body": "{\"a\":1}",
+    "header": "t=1767225600,v1=df9621853e9e17fe25790efd7a05a3f579dfd265b0c6188f37b9c097bbfaa4df",
+    "valid": false,
+    "why": "the body was changed after signing"
+  },
+  {
+    "name": "wrong-signature",
+    "secret": "whsec_fixture_not_a_real_secret",
+    "timestamp": 1767225600,
+    "body": "{}",
+    "header": "t=1767225600,v1=00000000000000000000000000000000000000000000000000000000000000ff",
+    "valid": false,
+    "why": "the signature does not match"
+  },
+  {
+    "name": "missing-v1",
+    "secret": "whsec_fixture_not_a_real_secret",
+    "timestamp": 1767225600,
+    "body": "{}",
+    "header": "t=1767225600",
+    "valid": false,
+    "why": "the header has no signature"
+  },
+  {
+    "name": "no-header",
+    "secret": "whsec_fixture_not_a_real_secret",
+    "timestamp": 1767225600,
+    "body": "{}",
+    "header": "",
+    "valid": false,
+    "why": "no header at all"
+  }
+]

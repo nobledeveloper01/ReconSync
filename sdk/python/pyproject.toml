@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reconsync"
+version = "0.1.0"
+description = "Report transaction legs to ReconSync and verify its reversal webhooks."
+requires-python = ">=3.10"
+# No dependencies, on purpose: this goes into a payment service, where every
+# package added is one a security team has to approve.
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["reconsync*"]

@@ -52,11 +52,42 @@ jobs:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
 
       - name: Tests
-        run: go test -race -coverpkg=./internal/... ./tests/...
+        run: go test -race -coverpkg=./internal/...,./pkg/... ./tests/...
 
       # Blocking gate (§8.1): tenant B must never reach tenant A's data.
       - name: Tenant isolation
         run: go test -race ./tests/... -run 'Store/TenantIsolation' -v
+
+  # The SDKs are tested against fixtures the Go signer produced, so a change to
+  # signing that only the Go tests cover would still fail here. That is the
+  # point: three implementations of one signature is exactly where a silent
+  # divergence would live.
+  sdks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Node SDK
+        working-directory: sdk/node
+        run: |
+          npm ci
+          npm run build
+          npx tsc --noEmit -p tsconfig.test.json
+          node --test test/*.test.js
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python SDK
+        working-directory: sdk/python
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest tests/ -q
 
   security:
     runs-on: ubuntu-latest
