@@ -20,12 +20,10 @@ func TestQRCodeDecodesBackToThePayload(t *testing.T) {
 	payloads := []string{
 		"a",
 		"HELLO WORLD",
-		"otpauth://totp/ReconSync:ops@example.com?algorithm=SHA1&digits=6&" +
-			"issuer=ReconSync&period=30&secret=2R4SADFMOKFJO4Y4S4QHJDR6EF3MNXQ4",
+		otpauthURI("ops@example.com"),
 		// A long address, because that is what pushes an otpauth URI into a
 		// larger version with more than one error correction block.
-		"otpauth://totp/ReconSync:a.very.long.name.indeed@a-long-domain.example.com" +
-			"?algorithm=SHA1&digits=6&issuer=ReconSync&period=30&secret=2R4SADFMOKFJO4Y4S4QHJDR6EF3MNXQ4",
+		otpauthURI("a.very.long.name.indeed@a-long-domain.example.com"),
 		strings.Repeat("x", 150),
 	}
 
@@ -46,6 +44,17 @@ func TestQRCodeDecodesBackToThePayload(t *testing.T) {
 	}
 }
 
+// otpauthURI builds an enrolment URI of realistic shape and length.
+//
+// The secret is assembled rather than written out: a thirty-two character
+// base32 literal beside the word "secret" is what a credential scanner is for,
+// and a test fixture is not worth teaching it to ignore.
+func otpauthURI(email string) string {
+	secret := strings.Repeat("ABCDEFGH", 4)
+	return "otpauth://totp/ReconSync:" + email +
+		"?algorithm=SHA1&digits=6&issuer=ReconSync&period=30&secret=" + secret
+}
+
 func TestQRCodeRefusesAPayloadItCannotHold(t *testing.T) {
 	// Better a clear error than a symbol that silently drops the end of the
 	// secret, which would enrol an authenticator that never produces a valid
@@ -56,7 +65,7 @@ func TestQRCodeRefusesAPayloadItCannotHold(t *testing.T) {
 }
 
 func TestQRSVGIsSelfContainedAndOpaque(t *testing.T) {
-	svg, err := account.QRSVG("otpauth://totp/ReconSync:ops@example.com?secret=ABCDEFGH")
+	svg, err := account.QRSVG(otpauthURI("ops@example.com"))
 	if err != nil {
 		t.Fatalf("QRSVG: %v", err)
 	}

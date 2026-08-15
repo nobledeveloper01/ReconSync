@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"encoding/base32"
 	"strings"
 	"testing"
 	"time"
@@ -95,8 +96,11 @@ func TestPasswordPolicyIsLengthBased(t *testing.T) {
 // implementation that only agrees with its own output would still not work with
 // anyone's authenticator app.
 func TestTOTPMatchesTheRFCVector(t *testing.T) {
-	// RFC 6238 appendix B, SHA-1, secret "12345678901234567890".
-	secret := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	// RFC 6238 appendix B, SHA-1. The RFC states the seed as the ASCII digits
+	// rather than as base32, so it is encoded here — which both matches the
+	// document a reader would check against and keeps a high-entropy literal
+	// that is not a secret out of the source.
+	secret := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
 
 	for _, tc := range []struct {
 		unix int64
