@@ -1402,16 +1402,20 @@ looking.
 
 ### Set it up properly
 
-Requires Go 1.23+ and Postgres 16.
+Requires Go 1.25+ and Postgres 16 — the version in `go.mod`, which is what an older toolchain will refuse to build.
 
 ```bash
 createdb reconsync
-for f in migrations/0*.up.sql; do psql -v ON_ERROR_STOP=1 -d reconsync -f "$f"; done
 
 export RECONSYNC_DATABASE_URL="postgres://localhost:5432/reconsync?sslmode=disable"
 export RECONSYNC_TENANT_SALT="$(openssl rand -hex 16)"
 export RECONSYNC_WEBHOOK_SECRET="$(openssl rand -hex 24)"
 
+# Applies the schema and records what it applied. Running the .sql files
+# through psql by hand also works, but leaves no ledger — so every later
+# `migrate up` reports the schema as pending and then fails on a table that
+# already exists, which is a confusing way to spend an afternoon.
+go run ./cmd/reconsyncctl migrate up
 go run ./cmd/reconsyncctl doctor
 go run ./cmd/reconsyncctl tenant create --id tnt_acme --env test
 go run ./cmd/reconsyncctl keys create --tenant tnt_acme --env test
